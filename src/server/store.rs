@@ -1,25 +1,35 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 
 pub struct Store {
-    data: HashMap<String, String>,
+    data: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl Store {
     pub fn new() -> Self {
         Self {
-            data: HashMap::new(),
+            data: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    pub fn insert(&mut self, key: String, value: String) {
-        self.data.insert(key, value);
+    pub fn insert(&self, key: String, value: String) {
+        let mut data = self.data.lock().unwrap();
+        data.insert(key, value);
     }
 
-    pub fn get(&self, key: &str) -> Option<&String> {
-        self.data.get(key)
+    pub fn get(&self, key: &str) -> Option<String> {
+        let data = self.data.lock().unwrap();
+        match data.get(key) {
+            Some(value) => Some(value.to_owned()),
+            None => None,
+        }
     }
+    
 
-    pub fn delete(&mut self, key: &str) {
-        self.data.remove(key);
+    pub fn delete(&self, key: &str) {
+        let mut data = self.data.lock().unwrap();
+        data.remove(key);
     }
 }
