@@ -6,6 +6,20 @@ const SET: &str = "SET";
 const GET: &str = "GET";
 const DELETE: &str = "DELETE";
 
+/// Dispatch a command to the store
+///
+/// # Arguments
+///
+/// * `command` - The command to dispatch - e.g. "SET key value"    
+/// * `store` - The store to dispatch the command to
+///
+/// # Returns
+///
+/// * Result<String, Box<dyn Error>> - The response
+///
+/// # Errors
+///
+/// * If the command is invalid 
 pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Box<dyn Error>> {
     let splited: Vec<&str> = command.splitn(3, ' ').collect();
 
