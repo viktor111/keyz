@@ -25,7 +25,13 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
 
     let command_name = splited[0];
     let key = splited[1];
-    let value = splited[2];
+
+    let mut value = "";
+    
+    if splited.len() > 2 {
+        value = splited[2];
+    }
+    
 
     match command_name {
         SET => set(key, value, store),
