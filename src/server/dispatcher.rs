@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use regex::Regex;
+use regex::{Captures, Regex};
 
 use super::{
     commands::{delete, expires_in, get, set},
@@ -33,8 +33,6 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
 
     let key = splited[1].to_string();
 
-    // SET user:1 {"name": "John", "age": 30} EX 10
-
     match command_name {
         SET => {
             let (key, value, seconds) = parse_set_command(&command);
@@ -50,32 +48,35 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
 fn parse_set_command(input: &str) -> (String, String, u64) {
     let re = Regex::new(r"SET\s+(\S+)\s+(.+?)(?:\s+EX)(\s+\d+)$").unwrap();
 
-    // Match on the captures and return the appropriate tuple
     match re.captures(input) {
         Some(captures) => {
-            // Get the key and value from the captures
-            let key = captures[1].to_string();
-            let value = captures[2].to_string();
-
-            // Get the expire time, if it was provided
-            let expire = captures.get(3).is_some();
-
-            if expire {
-                (key, value, captures[3].trim().parse::<u64>().unwrap())
-            }
-            else {
-                (key, value, 0)
-            }
+            return command_match_with_expire(captures);
         }
         None => {
-            let re = Regex::new(r"SET\s+(\S+)\s+(.+)(?:\s+EX\s+(\d+))?").unwrap();
-            let captures = re.captures(input).unwrap();
-
-            // Get the key and value from the captures
-            let key = captures[1].to_string();
-            let value = captures[2].to_string();
-
-            (key, value, 0)
+            return command_not_match_with_expire(input);
         }
     }
+}
+
+fn command_match_with_expire(captures: Captures) -> (String, String, u64) {
+    let key = captures[1].to_string();
+    let value = captures[2].to_string();
+
+    let expire = captures.get(3).is_some();
+
+    if expire {
+        (key, value, captures[3].trim().parse::<u64>().unwrap())
+    } else {
+        (key, value, 0)
+    }
+}
+
+fn command_not_match_with_expire(input: &str) -> (String, String, u64) {
+    let re = Regex::new(r"SET\s+(\S+)\s+(.+)(?:\s+EX\s+(\d+))?").unwrap();
+    let captures = re.captures(input).unwrap();
+
+    let key = captures[1].to_string();
+    let value = captures[2].to_string();
+
+    (key, value, 0)
 }
