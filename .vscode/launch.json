@@ -7,15 +7,15 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug executable 'key_value_store'",
+            "name": "Debug executable 'keyz'",
             "cargo": {
                 "args": [
                     "build",
-                    "--bin=key_value_store",
-                    "--package=key_value_store"
+                    "--bin=keyz",
+                    "--package=keyz"
                 ],
                 "filter": {
-                    "name": "key_value_store",
+                    "name": "keyz",
                     "kind": "bin"
                 }
             },
@@ -25,16 +25,16 @@
         {
             "type": "lldb",
             "request": "launch",
-            "name": "Debug unit tests in executable 'key_value_store'",
+            "name": "Debug unit tests in executable 'keyz'",
             "cargo": {
                 "args": [
                     "test",
                     "--no-run",
-                    "--bin=key_value_store",
-                    "--package=key_value_store"
+                    "--bin=keyz",
+                    "--package=keyz"
                 ],
                 "filter": {
-                    "name": "key_value_store",
+                    "name": "keyz",
                     "kind": "bin"
                 }
             },
