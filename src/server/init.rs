@@ -1,3 +1,4 @@
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 
 use crate::server::dispatcher::dispatcher;
@@ -23,11 +24,21 @@ async fn handle_connection(mut stream: TcpStream) {
                 .await
                 .expect("[-] Failed to read  command");
 
+            if command == "CLOSE" {
+                // send response to client
+                let response = "Closing connection";
+                helpers::write_message(&mut stream, &response).await.unwrap();
+                // close the connection
+                stream.shutdown().await.unwrap();
+
+                break;
+            }
+
             let response = dispatcher(command, &mut store)
                 .await
                 .expect("[-] Failed to dispatch command");
 
-            helpers::write_message(&mut stream, response)
+            helpers::write_message(&mut stream, &response)
                 .await
                 .expect("[-] Failed to write response");
         }

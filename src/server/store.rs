@@ -18,7 +18,7 @@ impl Store {
 
     pub fn insert(&self, key: String, value: String, seconds: u64) {
         let mut data = self.data.lock().unwrap();
-
+        println!("[STORE] Inserting {} {} {}", key, value, seconds);
         if seconds == 0 {
             data.insert(key, (value, 0));
             return;
@@ -34,6 +34,7 @@ impl Store {
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
+        println!("[STORE] Getting {} ", key);
         let mut data = self.data.lock().unwrap();
 
         let value = data.get(key).is_none();
@@ -62,11 +63,14 @@ impl Store {
     }
 
     pub fn delete(&self, key: &str) {
+        println!("[STORE] Deleting {}", key);
         let mut data = self.data.lock().unwrap();
         data.remove(key);
     }
 
     pub fn expires_in(&self, key: &str) -> Option<u64> {
+        println!("[STORE] Getting expires_in {}", key);
+
         let data = self.data.lock().unwrap();
 
         let now = SystemTime::now()
