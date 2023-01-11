@@ -45,7 +45,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "key_value_store"
+name = "keyz"
 version = "0.1.0"
 dependencies = [
  "regex",

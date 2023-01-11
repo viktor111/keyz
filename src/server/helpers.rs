@@ -64,19 +64,18 @@ pub async fn listener_accept_conn(
 /// * If the message cannot be read
 
 pub async fn read_message(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
-    let mut buffer = [0; 1024];
-    let bytes_read = stream.read(&mut buffer).await;
+    let mut len_bytes = [0; 4];
+    let bytes_read = stream.read(&mut len_bytes).await?;
 
-    match bytes_read {
-        Ok(bytes_read) => {
-            println!("bytes_read: {}", bytes_read);
-            let message = String::from_utf8_lossy(&buffer[..bytes_read])
-                .trim()
-                .to_string();
-            Ok(message)
-        }
-        Err(e) => Err(e.into()),
+    if bytes_read < 4 {
+        return Err("Failed to read the length of the message".into());
     }
+    let len = u32::from_be_bytes(len_bytes);
+    let mut buffer = vec![0; len as usize];
+    stream.read_exact(&mut buffer).await?;
+    let message = String::from_utf8_lossy(&buffer);
+
+    Ok(message.to_string())
 }
 
 /// Write a message to a TCP stream
@@ -94,13 +93,29 @@ pub async fn read_message(stream: &mut TcpStream) -> Result<String, Box<dyn Erro
 ///
 /// * If the message cannot be written
 
-pub async fn write_message(stream: &mut TcpStream, message: String) -> Result<(), Box<dyn Error>> {
-    let written = stream.write(message.as_bytes()).await;
+// pub async fn write_message(stream: &mut TcpStream,  message: String) -> Result<(), Box<dyn Error>> {
 
-    match written {
-        Ok(_) => Ok(()),
-        Err(e) => Err(e.into()),
-    }
+//     // message with length in the beginning
+//     let mut bytes_len = &message.as_bytes();
+//     let mut bytes_len = bytes_len.len().to_be_bytes();
+//     let mut bytes = Vec::new();
+//     bytes.append(&mut bytes_len.to_vec());
+//     bytes.append(&mut message.as_bytes().to_vec());
+
+//     let written = stream.write(message.as_bytes()).await;
+
+//     match written {
+//         Ok(_) => Ok(()),
+//         Err(e) => Err(e.into()),
+//     }
+// }
+
+pub async fn write_message(stream: &mut TcpStream, message: &str) -> Result<(), Box<dyn Error>> {
+    let len = message.len() as u32;
+    let len_bytes = len.to_be_bytes();
+    stream.write_all(&len_bytes).await?;
+    stream.write_all(message.as_bytes()).await?;
+    Ok(())
 }
 
 /// Create a SocketAddr from IP and port as string in from of "0.0.0.0:1111"
