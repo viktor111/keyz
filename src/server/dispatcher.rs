@@ -29,6 +29,10 @@ const EXPIRES_IN: &str = "EXIN";
 pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Box<dyn Error>> {
     let splited: Vec<&str> = command.splitn(3, ' ').collect();
 
+    if splited.len() < 2 {
+        return Ok("[!] Invalid command".to_string());
+    }
+
     let command_name = splited[0];
 
     let key = splited[1].to_string();

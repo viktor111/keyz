@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use tokio::net::TcpStream;
+
+use crate::server::helpers;
+
 pub struct AppError {
     pub code: u32,
     pub message: String,
@@ -10,6 +14,13 @@ impl AppError {
         AppError { code, message }
     }
 }
+
+pub async fn global_error_handler(err: Box<dyn std::error::Error>, stream: &mut TcpStream) {
+    println!("[-] From global {}", err);
+    helpers::write_message(stream, &format!("Error: {}", err)).await.unwrap();
+}
+
+
 
 pub fn error_codes() -> HashMap<u32, String> {
     let mut error_codes = HashMap::new();
