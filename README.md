@@ -13,6 +13,8 @@ Simple async key value store with rust and tokio
   - Returns the seconds left before a key will expire
 - ```DEL [key]```
   - Deletes a key and value
+- ```CLOSE```
+  - Closes the connection
 
 ## Examples using commands
 - ```SET text some text blah```
