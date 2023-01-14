@@ -3,15 +3,15 @@ Simple async key value store with rust and tokio
 
 ## Supported commands
 
-- SET [key] [value]
+- ```SET [key] [value]```
   - Sets key and value
-- SET [key] [value] EX [seconds]
+- ```SET [key] [value] EX [seconds]```
   - Sets key and value but with expiration time in seconds
-- GET [key]
+- ```GET [key]```
  - Gets the value set for the given key
-- EXIN [key]
+- ```EXIN [key]```
  - Returns the seconds left before a key will expire
-- DEL [key]
+- ```DEL [key]```
   - Deletes a key and value
 
 ## Examples using commands
