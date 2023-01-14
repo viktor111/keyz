@@ -30,6 +30,7 @@ async fn handle_connection(mut stream: TcpStream) {
 
             if command == "CLOSE" {
                 let response = "Closing connection";
+                println!("[.] Closing connection");
                 match helpers::write_message(&mut stream, &response).await {
                     Ok(_) => (),
                     Err(e) => {

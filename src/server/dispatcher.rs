@@ -30,7 +30,7 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
     let splited: Vec<&str> = command.splitn(3, ' ').collect();
 
     if splited.len() < 2 {
-        return Err("error:invalid command".into());
+        return Ok("error:invalid command".into());
     }
 
     let command_name = splited[0];
@@ -41,13 +41,13 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
         SET => {
             match parse_set_command(&command) {
                 Ok((key, value, seconds)) => set(&key, value, store, seconds),
-                Err(e) => Err("error:set command invalid".into()),
+                Err(e) => Ok("error:set command invalid".into()),
             }
         }
         GET => get(&key, store),
         DELETE => delete(&key, store),
         EXPIRES_IN => expires_in(&key, store),
-        _ => Err("error:invalid command".into()),
+        _ => Ok("error:invalid command".into()),
     }
 }
 

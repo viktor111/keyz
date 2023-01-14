@@ -79,7 +79,17 @@ impl Store {
             .as_secs();
 
         match data.get(key) {
-            Some(value) => Some((Wrapping(value.1) - Wrapping(now)).0), // If is expired and is 0 will not overflow and return large number
+            Some(value) => {
+                if value.1 == 0 {
+                    return None;
+                }
+
+                if now > value.1 {
+                    return None;
+                }
+
+                return Some((Wrapping(value.1) - Wrapping(now)).0);
+            }, 
             None => None,
         }
     }
