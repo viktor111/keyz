@@ -8,9 +8,9 @@ Simple async key value store with rust and tokio
 - ```SET [key] [value] EX [seconds]```
   - Sets key and value but with expiration time in seconds
 - ```GET [key]```
- - Gets the value set for the given key
+  - Gets the value set for the given key
 - ```EXIN [key]```
- - Returns the seconds left before a key will expire
+  - Returns the seconds left before a key will expire
 - ```DEL [key]```
   - Deletes a key and value
 
