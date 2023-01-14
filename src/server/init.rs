@@ -20,27 +20,51 @@ async fn handle_connection(mut stream: TcpStream) {
 
     tokio::spawn(async move {
         loop {
-            let command = helpers::read_message(&mut stream)
-                .await
-                .expect("[-] Failed to read  command");
+            let command = match helpers::read_message(&mut stream).await {
+                Ok(command) => command,
+                Err(e) => {
+                    println!("[-] Failed to read command: {}", e);
+                    continue;
+                }
+            };
 
             if command == "CLOSE" {
-                // send response to client
                 let response = "Closing connection";
-                helpers::write_message(&mut stream, &response).await.unwrap();
-                // close the connection
-                stream.shutdown().await.unwrap();
+                match helpers::write_message(&mut stream, &response).await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        println!("[-] Failed to write response: {}", e);
+                        break;
+                    }
+                }
+                match stream.shutdown().await {
+                    Ok(_) => (),
+                    Err(e) => {
+                        println!("[-] Failed to close connection closing by force: {}", e);
+                        break;
+                    }
+                }
 
                 break;
             }
 
-            let response = dispatcher(command, &mut store)
-                .await
-                .expect("[-] Failed to dispatch command");
+            let response = match dispatcher(command, &mut store).await {
+                Ok(response) => response,
+                Err(e) => {
+                    println!("[-] Failed to dispatch command: {}", e);
+                    break;
+                }
+            };
 
-            helpers::write_message(&mut stream, &response)
+            match helpers::write_message(&mut stream, &response)
                 .await
-                .expect("[-] Failed to write response");
+            {
+                Ok(_) => (),
+                Err(e) => {
+                    println!("[-] Failed to write response: {}", e);
+                    break;
+                }
+            }
         }
     });
 }

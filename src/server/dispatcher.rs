@@ -30,7 +30,7 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
     let splited: Vec<&str> = command.splitn(3, ' ').collect();
 
     if splited.len() < 2 {
-        return Ok("[!] Invalid command".to_string());
+        return Err("error:invalid command".into());
     }
 
     let command_name = splited[0];
@@ -39,48 +39,61 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
 
     match command_name {
         SET => {
-            let (key, value, seconds) = parse_set_command(&command);
-            set(&key, value, store, seconds)
+            match parse_set_command(&command) {
+                Ok((key, value, seconds)) => set(&key, value, store, seconds),
+                Err(e) => Err("error:set command invalid".into()),
+            }
         }
         GET => get(&key, store),
         DELETE => delete(&key, store),
         EXPIRES_IN => expires_in(&key, store),
-        _ => Ok("[!] Invalid command".to_string()),
+        _ => Err("error:invalid command".into()),
     }
 }
 
-fn parse_set_command(input: &str) -> (String, String, u64) {
+fn parse_set_command(input: &str) -> Result<(String, String, u64), Box<dyn Error>> {
     let re = Regex::new(r"SET\s+(\S+)\s+(.+?)(?:\s+EX)(\s+\d+)$").unwrap();
 
     match re.captures(input) {
         Some(captures) => {
-            return command_match_with_expire(captures);
+            match command_match_with_expire(captures) {
+                Ok((key, value, seconds)) => Ok((key, value, seconds)),
+                Err(e) => Err(e),
+            }
         }
         None => {
-            return command_not_match_with_expire(input);
+            match command_not_match_with_expire(input) {
+                Ok((key, value, seconds)) => Ok((key, value, seconds)),
+                Err(e) => Err(e),
+            }
         }
     }
 }
 
-fn command_match_with_expire(captures: Captures) -> (String, String, u64) {
+fn command_match_with_expire(captures: Captures) -> Result<(String, String, u64), Box<dyn Error>> {
     let key = captures[1].to_string();
     let value = captures[2].to_string();
 
     let expire = captures.get(3).is_some();
 
     if expire {
-        (key, value, captures[3].trim().parse::<u64>().unwrap())
+        Ok((key, value, captures[3].trim().parse::<u64>().unwrap()))
     } else {
-        (key, value, 0)
+        Ok((key, value, 0))
     }
 }
 
-fn command_not_match_with_expire(input: &str) -> (String, String, u64) {
+fn command_not_match_with_expire(input: &str) -> Result<(String, String, u64), Box<dyn Error>> {
     let re = Regex::new(r"SET\s+(\S+)\s+(.+)(?:\s+EX\s+(\d+))?").unwrap();
-    let captures = re.captures(input).unwrap();
+    let captures = re.captures(input);
 
-    let key = captures[1].to_string();
-    let value = captures[2].to_string();
+    match captures {
+        Some(captures) => {
+            let key = captures[1].into();
+            let value = captures[2].to_string();
 
-    (key, value, 0)
+            Ok((key, value, 0))
+        }
+        None => Err("error:invalid command".into()),
+    }
 }
