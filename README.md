@@ -1,6 +1,9 @@
 # keyz
 Simple async key value store with rust and tokio
 
+## CLI and clients
+[CLI](https://github.com/viktor111/keyz_cli.git)
+
 ## Supported commands
 
 - ```SET [key] [value]```
