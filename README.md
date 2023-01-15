@@ -30,7 +30,7 @@ Simple async key value store with rust and tokio
 - ```EXIN user:1```
   - Will return the time left this key has before expiration in seconds
   - If already expired it will return null
-  - If key has no expiration set return 0
+  - If key has no expiration set return null
 - ```DEL user:1```
   - Will attempt to delete the key ```user:1```
   - If deleted it will return the key name deleted back in this case it will return ```user:1```
