@@ -5,16 +5,6 @@ use std::{
 
 use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpListener, net::TcpStream};
 
-/// Create a listener on a port
-///
-/// # Arguments
-///
-/// * `port` - The port to bind to
-///
-/// # Returns
-///
-/// * Result<TcpListener, Box<dyn Error>> - The listener
-
 pub async fn create_listener(addr: SocketAddr) -> Result<TcpListener, Box<dyn Error>> {
     let listener = TcpListener::bind(addr).await;
 
@@ -23,20 +13,6 @@ pub async fn create_listener(addr: SocketAddr) -> Result<TcpListener, Box<dyn Er
         Err(e) => Err(e.into()),
     }
 }
-
-/// Accept a connection from a client
-///
-/// # Arguments
-///
-/// * `listener` - The listener to accept a connection from
-///
-/// # Returns
-///
-/// * Result<TcpStream, Box<dyn Error>> - The stream to the client
-///
-/// # Errors
-///
-/// * If the connection cannot be accepted
 
 pub async fn listener_accept_conn(
     listener: &TcpListener,
@@ -49,19 +25,6 @@ pub async fn listener_accept_conn(
     }
 }
 
-/// Read a message from a TCP stream and return it as a String
-///
-/// # Arguments
-///
-/// * `stream` - The stream to read from
-///
-/// # Returns
-///
-/// * Result<String, Box<dyn Error>> - The message
-///
-/// # Errors
-///
-/// * If the message cannot be read
 
 pub async fn read_message(stream: &mut TcpStream) -> Result<String, Box<dyn Error>> {
     let mut len_bytes = [0; 4];
@@ -78,38 +41,6 @@ pub async fn read_message(stream: &mut TcpStream) -> Result<String, Box<dyn Erro
     Ok(message.to_string())
 }
 
-/// Write a message to a TCP stream
-///
-/// # Arguments
-///
-/// * `stream` - The stream to write to
-/// * `message` - The message to write
-///
-/// # Returns
-///
-/// * Result<(), Box<dyn Error>> - Empty result
-///
-/// # Errors
-///
-/// * If the message cannot be written
-
-// pub async fn write_message(stream: &mut TcpStream,  message: String) -> Result<(), Box<dyn Error>> {
-
-//     // message with length in the beginning
-//     let mut bytes_len = &message.as_bytes();
-//     let mut bytes_len = bytes_len.len().to_be_bytes();
-//     let mut bytes = Vec::new();
-//     bytes.append(&mut bytes_len.to_vec());
-//     bytes.append(&mut message.as_bytes().to_vec());
-
-//     let written = stream.write(message.as_bytes()).await;
-
-//     match written {
-//         Ok(_) => Ok(()),
-//         Err(e) => Err(e.into()),
-//     }
-// }
-
 pub async fn write_message(stream: &mut TcpStream, message: &str) -> Result<(), Box<dyn Error>> {
     let len = message.len() as u32;
     let len_bytes = len.to_be_bytes();
@@ -117,20 +48,6 @@ pub async fn write_message(stream: &mut TcpStream, message: &str) -> Result<(), 
     stream.write_all(message.as_bytes()).await?;
     Ok(())
 }
-
-/// Create a SocketAddr from IP and port as string in from of "0.0.0.0:1111"
-///
-/// # Arguments
-///
-/// * `ip` - The IP address as string
-///
-/// # Returns
-///
-/// * Result<SocketAddr, Box<dyn Error>> - The SocketAddr
-///
-/// # Errors
-///
-/// * If the IP address argument is invalid
 
 pub fn socket_address_from_string_ip(ip: String) -> Result<SocketAddr, Box<dyn Error>> {
     const INVALID_IP_ERROR: &str = "Invalid IP address - should be in format: 127.0.0.1:8080";

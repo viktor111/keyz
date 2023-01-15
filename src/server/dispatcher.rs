@@ -9,23 +9,9 @@ use super::{
 
 const SET: &str = "SET";
 const GET: &str = "GET";
-const DELETE: &str = "DELETE";
+const DELETE: &str = "DEL";
 const EXPIRES_IN: &str = "EXIN";
 
-/// Dispatch a command to the store
-///
-/// # Arguments
-///
-/// * `command` - The command to dispatch - e.g. "SET key value"    
-/// * `store` - The store to dispatch the command to
-///
-/// # Returns
-///
-/// * Result<String, Box<dyn Error>> - The response
-///
-/// # Errors
-///
-/// * If the command is invalid
 pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Box<dyn Error>> {
     let splited: Vec<&str> = command.splitn(3, ' ').collect();
 
@@ -41,7 +27,7 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
         SET => {
             match parse_set_command(&command) {
                 Ok((key, value, seconds)) => set(&key, value, store, seconds),
-                Err(e) => Ok("error:set command invalid".into()),
+                Err(_) => Ok("error:set command invalid".into()),
             }
         }
         GET => get(&key, store),
