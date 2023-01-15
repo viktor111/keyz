@@ -9,7 +9,7 @@ use super::{
 
 const SET: &str = "SET";
 const GET: &str = "GET";
-const DELETE: &str = "DELETE";
+const DELETE: &str = "DEL";
 const EXPIRES_IN: &str = "EXIN";
 
 /// Dispatch a command to the store
