@@ -49,7 +49,7 @@ impl Store {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
-            
+
         if value.1 == 0 {
             return Some(value.0.clone());
         }
@@ -62,10 +62,15 @@ impl Store {
         return Some(value.0.clone());
     }
 
-    pub fn delete(&self, key: &str) {
+    pub fn delete(&self, key: &str) -> Option<String> {
         println!("[STORE] Deleting {}", key);
         let mut data = self.data.lock().unwrap();
-        data.remove(key);
+        if data.contains_key(key) {
+            data.remove(key);
+            return Some(key.to_owned());
+        }
+
+        return None;
     }
 
     pub fn expires_in(&self, key: &str) -> Option<u64> {
@@ -89,7 +94,7 @@ impl Store {
                 }
 
                 return Some((Wrapping(value.1) - Wrapping(now)).0);
-            }, 
+            }
             None => None,
         }
     }
