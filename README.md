@@ -43,3 +43,13 @@ Simple async key value store with rust and tokio
   - Will attempt to delete the key ```user:1```
   - If deleted it will return the key name deleted back in this case it will return ```user:1```
   - If the key does not exist it will return null
+  
+  ## Features
+  Features besides the base SET GET DEL
+  - [x] Key expiration
+  - [x] Command to show time left a key has before expiry in seconds
+  - [] Password protection
+  - [] Persistance
+  - [] Monitoring
+  - [] Data compression
+  - [] Data partitioning
