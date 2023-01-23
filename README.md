@@ -48,6 +48,7 @@ Simple async key value store with rust and tokio
   Features besides the base SET GET DEL
   - [x] Key expiration
   - [x] Command to show time left a key has before expiry in seconds
+  - [ ] Settings reader from a config file
   - [ ] Password protection
   - [ ] Persistance
   - [ ] Monitoring
