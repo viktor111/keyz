@@ -1,12 +1,16 @@
+use std::io::{Write, Read};
 use std::num::Wrapping;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use flate2::read::GzDecoder;
 
 pub struct Store {
-    data: Arc<Mutex<HashMap<String, (String, u64)>>>,
+    data: Arc<Mutex<HashMap<String, (Vec<u8>, u64)>>>,
 }
 
 impl Store {
@@ -16,11 +20,16 @@ impl Store {
         }
     }
 
-    pub fn insert(&self, key: String, value: String, seconds: u64) {
+    pub fn insert(&self, key: String, value: Vec<u8>, seconds: u64) {
         let mut data = self.data.lock().unwrap();
-        println!("[STORE] Inserting {} {} {}", key, value, seconds);
+        println!("[STORE] Inserting key:{} expire secs: {}", key, seconds);
+
+        let mut e = GzEncoder::new(Vec::new(), Compression::default());
+        e.write_all(&value).unwrap();
+        let compressed_data = e.finish().unwrap();
+
         if seconds == 0 {
-            data.insert(key, (value, 0));
+            data.insert(key, (compressed_data, 0));
             return;
         }
 
@@ -30,10 +39,10 @@ impl Store {
             .as_secs()
             + seconds;
 
-        data.insert(key, (value, expire_in));
+        data.insert(key, (compressed_data, expire_in));
     }
 
-    pub fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
         println!("[STORE] Getting {} ", key);
         let mut data = self.data.lock().unwrap();
 
@@ -45,13 +54,17 @@ impl Store {
 
         let value = data.get(key).unwrap();
 
+        let mut d = GzDecoder::new(&value.0[..]);
+        let mut decompressed_data = Vec::new();
+        d.read_to_end(&mut decompressed_data).unwrap();
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs();
 
         if value.1 == 0 {
-            return Some(value.0.clone());
+            return Some(decompressed_data);
         }
 
         if now > value.1 {
@@ -59,7 +72,7 @@ impl Store {
             return None;
         }
 
-        return Some(value.0.clone());
+        return Some(decompressed_data);
     }
 
     pub fn delete(&self, key: &str) -> Option<String> {
