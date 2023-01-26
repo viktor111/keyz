@@ -8,13 +8,13 @@ pub fn set(
     store: &mut Store,
     seconds: u64,
 ) -> Result<String, Box<dyn Error>> {
-    store.insert(key.to_string(), value, seconds);
+    store.insert(key.to_string(), value.into_bytes().to_vec(), seconds);
     Ok("ok".to_string())
 }
 
 pub fn get(key: &str, store: &mut Store) -> Result<String, Box<dyn Error>> {
     match store.get(key) {
-        Some(value) => Ok(value),
+        Some(value) => Ok(String::from_utf8(value).unwrap()),
         None => Ok("null".to_string()),
     }
 }

@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.21.2", features = ["full", "time"] }
 regex = "1.7.1"
+flate2 = "1.0.25"
