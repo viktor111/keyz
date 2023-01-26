@@ -52,6 +52,6 @@ Simple async key value store with rust and tokio
   - [ ] Password protection
   - [ ] Persistance
   - [ ] Monitoring
-  - [ ] Data compression
+  - [x] Data compression
   - [ ] Data partitioning
   - [ ] Statistics like connected clients, keys count, storage taken
