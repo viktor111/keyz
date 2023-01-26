@@ -24,7 +24,7 @@ async fn handle_connection(mut stream: TcpStream) {
                 Ok(command) => command,
                 Err(e) => {
                     println!("[-] Failed to read command: {}", e);
-                    continue;
+                    break;
                 }
             };
 
