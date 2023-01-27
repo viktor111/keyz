@@ -8,6 +8,19 @@ Simple async key value store with rust and tokio
 - python - Work in progress...
 - js/ts - Work in progress...
 - java - Work in progress...
+# Run
+- ***The port is always*** - `7667`
+
+## Run locally using cargo
+
+1. `cargo install keyz`
+2. `keyz`
+3. If you get command not found you need to add cargo bin to the PATH
+
+## Run using docker image
+
+1. `docker pull zvado1/keyz`
+2. `sudo docker run --network host -d keyz`
 
 ## Supported commands
 
