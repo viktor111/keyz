@@ -1,7 +1,11 @@
 [package]
 name = "keyz"
-version = "0.1.0"
+version = "1.0.2"
 edition = "2021"
+description = "keyz client for Rust"
+license = "MIT"
+repository = "https://github.com/viktor111/keyz"
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
