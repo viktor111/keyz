@@ -79,8 +79,23 @@ impl Store {
         println!("[STORE] Deleting {}", key);
         let mut data = self.data.lock().unwrap();
         if data.contains_key(key) {
-            data.remove(key);
-            return Some(key.to_owned());
+
+            let value = data.get(key).unwrap();
+
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+
+            if value.1 == 0 {
+                data.remove(key);
+                return Some(key.to_owned());
+            }
+
+            if now > value.1 {
+                data.remove(key);
+                return None
+            }
         }
 
         return None;
