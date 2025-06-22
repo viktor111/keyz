@@ -32,3 +32,27 @@ pub fn expires_in(key: &str, store: &mut Store) -> Result<String, Box<dyn Error>
         None => Ok("null".to_string()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn set_get_delete_flow() {
+        let mut store = Store::new();
+        assert_eq!(set("a", "b".into(), &mut store, 0).unwrap(), "ok");
+        assert_eq!(get("a", &mut store).unwrap(), "b");
+        assert_eq!(delete("a", &mut store).unwrap(), "a");
+        assert_eq!(get("a", &mut store).unwrap(), "null");
+    }
+
+    #[test]
+    fn set_with_expiration_works() {
+        let mut store = Store::new();
+        assert_eq!(set("a", "b".into(), &mut store, 1).unwrap(), "ok");
+        thread::sleep(Duration::from_secs(2));
+        assert_eq!(get("a", &mut store).unwrap(), "null");
+    }
+}

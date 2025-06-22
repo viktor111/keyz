@@ -83,3 +83,47 @@ fn command_not_match_with_expire(input: &str) -> Result<(String, String, u64), B
         None => Err("error:invalid command".into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{sleep, Duration};
+
+    #[test]
+    fn parse_set_with_expire() {
+        let (k, v, s) = parse_set_command("SET k v EX 5").unwrap();
+        assert_eq!((k, v, s), ("k".to_string(), "v".to_string(), 5));
+    }
+
+    #[test]
+    fn parse_set_without_expire() {
+        let (k, v, s) = parse_set_command("SET k some value").unwrap();
+        assert_eq!((k, v, s), ("k".to_string(), "some value".to_string(), 0));
+    }
+
+    #[test]
+    fn parse_set_invalid() {
+        assert!(parse_set_command("SET k").is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatcher_set_get() {
+        let mut store = Store::new();
+        assert_eq!(dispatcher("SET a 1".into(), &mut store).await.unwrap(), "ok");
+        assert_eq!(dispatcher("GET a".into(), &mut store).await.unwrap(), "1");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_expiration() {
+        let mut store = Store::new();
+        assert_eq!(dispatcher("SET a 1 EX 1".into(), &mut store).await.unwrap(), "ok");
+        sleep(Duration::from_secs(2)).await;
+        assert_eq!(dispatcher("GET a".into(), &mut store).await.unwrap(), "null");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_invalid_command() {
+        let mut store = Store::new();
+        assert_eq!(dispatcher("NOOP".into(), &mut store).await.unwrap(), "error:invalid command");
+    }
+}
