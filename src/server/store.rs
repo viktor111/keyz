@@ -127,3 +127,40 @@ impl Store {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Duration;
+
+    #[test]
+    fn insert_and_get_without_expire() {
+        let store = Store::new();
+        store.insert("a".to_string(), b"b".to_vec(), 0);
+        assert_eq!(store.get("a"), Some(b"b".to_vec()));
+    }
+
+    #[test]
+    fn value_expires() {
+        let store = Store::new();
+        store.insert("a".to_string(), b"b".to_vec(), 1);
+        thread::sleep(Duration::from_secs(2));
+        assert_eq!(store.get("a"), None);
+    }
+
+    #[test]
+    fn delete_and_expires_in_behaviour() {
+        let store = Store::new();
+        store.insert("a".to_string(), b"b".to_vec(), 0);
+        assert_eq!(store.delete("a"), Some("a".to_string()));
+        assert_eq!(store.get("a"), None);
+
+        store.insert("b".to_string(), b"c".to_vec(), 1);
+        assert!(store.expires_in("b").unwrap() <= 1);
+        thread::sleep(Duration::from_secs(2));
+        assert_eq!(store.delete("b"), None);
+        assert_eq!(store.expires_in("b"), None);
+        assert_eq!(store.get("b"), None);
+    }
+}

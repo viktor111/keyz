@@ -81,3 +81,37 @@ pub fn socket_address_from_string_ip(ip: String) -> Result<SocketAddr, Box<dyn E
 
     return Ok(socket_addr);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::{TcpStream};
+    use tokio::time::{sleep, Duration};
+
+    #[test]
+    fn parses_valid_socket_addr() {
+        let addr = socket_address_from_string_ip("127.0.0.1:8080".to_string()).unwrap();
+        assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+    }
+
+    #[test]
+    fn rejects_invalid_socket_addr() {
+        assert!(socket_address_from_string_ip("300.0.0.1:80".to_string()).is_err());
+    }
+
+    #[tokio::test]
+    async fn create_listener_and_transfer() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = create_listener(addr).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        let (mut server_stream, _) = listener_accept_conn(&listener).await.unwrap();
+
+        write_message(&mut client, "hello").await.unwrap();
+        let msg = read_message(&mut server_stream).await.unwrap();
+        assert_eq!(msg, "hello");
+
+        sleep(Duration::from_millis(10)).await; // ensure cleanup
+    }
+}
