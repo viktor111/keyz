@@ -19,17 +19,17 @@ pub fn get(key: &str, store: &Store) -> Result<String> {
 }
 
 pub fn delete(key: &str, store: &Store) -> Result<String> {
-    match store.delete(key)? {
-        Some(value) => Ok(value),
-        None => Ok("null".to_string()),
-    }
+    Ok(match store.delete(key)? {
+        Some(value) => value,
+        None => "null".to_string(),
+    })
 }
 
 pub fn expires_in(key: &str, store: &Store) -> Result<String> {
-    match store.expires_in(key)? {
-        Some(value) => Ok(value.to_string()),
-        None => Ok("null".to_string()),
-    }
+    Ok(match store.expires_in(key)? {
+        Some(value) => value.to_string(),
+        None => "null".to_string(),
+    })
 }
 
 #[cfg(test)]
