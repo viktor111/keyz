@@ -1,16 +1,15 @@
-use std::error::Error;
-
 use super::{
     commands::{delete, expires_in, get, set},
     store::Store,
 };
+use crate::server::error::{KeyzError, Result};
 
 const SET: &str = "SET";
 const GET: &str = "GET";
 const DELETE: &str = "DEL";
 const EXPIRES_IN: &str = "EXIN";
 
-pub async fn dispatcher(command: String, store: &Store) -> Result<String, Box<dyn Error>> {
+pub async fn dispatcher(command: String, store: &Store) -> Result<String> {
     let splited: Vec<&str> = command.splitn(3, ' ').collect();
 
     if splited.len() < 2 {
@@ -32,23 +31,28 @@ pub async fn dispatcher(command: String, store: &Store) -> Result<String, Box<dy
     }
 }
 
-fn parse_set_command(input: &str) -> Result<(String, String, u64), Box<dyn Error>> {
+fn parse_set_command(input: &str) -> Result<(String, String, u64)> {
     const INVALID: &str = "error:set command invalid";
 
     let mut parts = input.splitn(3, ' ');
 
     if parts.next() != Some(SET) {
-        return Err(INVALID.into());
+        return Err(KeyzError::InvalidCommand(INVALID.into()));
     }
 
-    let key = parts.next().ok_or(INVALID)?;
+    let key = parts
+        .next()
+        .ok_or_else(|| KeyzError::InvalidCommand(INVALID.into()))?;
     if key.is_empty() {
-        return Err(INVALID.into());
+        return Err(KeyzError::InvalidCommand(INVALID.into()));
     }
 
-    let remainder = parts.next().ok_or(INVALID)?.trim();
+    let remainder = parts
+        .next()
+        .ok_or_else(|| KeyzError::InvalidCommand(INVALID.into()))?
+        .trim();
     if remainder.is_empty() {
-        return Err(INVALID.into());
+        return Err(KeyzError::InvalidCommand(INVALID.into()));
     }
 
     let mut value = remainder.to_string();
@@ -57,7 +61,7 @@ fn parse_set_command(input: &str) -> Result<(String, String, u64), Box<dyn Error
     if let Some(idx) = remainder.rfind(" EX ") {
         let ttl_fragment = remainder[idx + 4..].trim();
         if ttl_fragment.is_empty() {
-            return Err(INVALID.into());
+            return Err(KeyzError::InvalidCommand(INVALID.into()));
         }
 
         let ttl_tokens: Vec<&str> = ttl_fragment.split_whitespace().collect();
@@ -66,15 +70,15 @@ fn parse_set_command(input: &str) -> Result<(String, String, u64), Box<dyn Error
                 Ok(parsed_seconds) => {
                     let candidate_value = remainder[..idx].trim_end();
                     if candidate_value.is_empty() {
-                        return Err(INVALID.into());
+                        return Err(KeyzError::InvalidCommand(INVALID.into()));
                     }
                     value = candidate_value.to_string();
                     seconds = parsed_seconds;
                 }
-                Err(_) => return Err(INVALID.into()),
+                Err(_) => return Err(KeyzError::InvalidCommand(INVALID.into())),
             }
-        } else if ttl_tokens.len() == 0 {
-            return Err(INVALID.into());
+        } else if ttl_tokens.is_empty() {
+            return Err(KeyzError::InvalidCommand(INVALID.into()));
         }
     }
 
@@ -87,15 +91,17 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     #[test]
-    fn parse_set_with_expire() {
-        let (k, v, s) = parse_set_command("SET k v EX 5").unwrap();
+    fn parse_set_with_expire() -> Result<()> {
+        let (k, v, s) = parse_set_command("SET k v EX 5")?;
         assert_eq!((k, v, s), ("k".to_string(), "v".to_string(), 5));
+        Ok(())
     }
 
     #[test]
-    fn parse_set_without_expire() {
-        let (k, v, s) = parse_set_command("SET k some value").unwrap();
+    fn parse_set_without_expire() -> Result<()> {
+        let (k, v, s) = parse_set_command("SET k some value")?;
         assert_eq!((k, v, s), ("k".to_string(), "some value".to_string(), 0));
+        Ok(())
     }
 
     #[test]
@@ -109,40 +115,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatcher_set_get() {
+    async fn dispatcher_set_get() -> Result<()> {
         let store = Store::new();
-        assert_eq!(dispatcher("SET a 1".into(), &store).await.unwrap(), "ok");
-        assert_eq!(dispatcher("GET a".into(), &store).await.unwrap(), "1");
+        assert_eq!(dispatcher("SET a 1".into(), &store).await?, "ok");
+        assert_eq!(dispatcher("GET a".into(), &store).await?, "1");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn dispatcher_expiration() {
+    async fn dispatcher_expiration() -> Result<()> {
         let store = Store::new();
         assert_eq!(
-            dispatcher("SET a 1 EX 1".into(), &store).await.unwrap(),
+            dispatcher("SET a 1 EX 1".into(), &store).await?,
             "ok"
         );
         sleep(Duration::from_secs(2)).await;
-        assert_eq!(dispatcher("GET a".into(), &store).await.unwrap(), "null");
+        assert_eq!(dispatcher("GET a".into(), &store).await?, "null");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn dispatcher_invalid_command() {
+    async fn dispatcher_invalid_command() -> Result<()> {
         let store = Store::new();
         assert_eq!(
-            dispatcher("NOOP".into(), &store).await.unwrap(),
+            dispatcher("NOOP".into(), &store).await?,
             "error:invalid command"
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn dispatcher_handles_bad_expiration_without_crashing() {
+    async fn dispatcher_handles_bad_expiration_without_crashing() -> Result<()> {
         let store = Store::new();
-        assert_eq!(
-            dispatcher("SET a v EX nope".into(), &store)
-                .await
-                .unwrap(),
-            "error:set command invalid"
-        );
+        let response = dispatcher("SET a v EX nope".into(), &store).await?;
+        assert_eq!(response, "error:set command invalid");
+        Ok(())
     }
 }

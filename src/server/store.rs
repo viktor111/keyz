@@ -1,170 +1,299 @@
-use std::io::{Write, Read};
-use std::num::Wrapping;
 use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    io::{Read, Write},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use flate2::write::GzEncoder;
-use flate2::Compression;
-use flate2::read::GzDecoder;
+
+use dashmap::DashMap;
+use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+
+use crate::server::error::{KeyzError, Result};
+
+const DEFAULT_COMPRESSION_THRESHOLD: usize = 512;
+const CLEANUP_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
 pub struct Store {
-    data: Arc<Mutex<HashMap<String, (Vec<u8>, u64)>>>,
+    data: Arc<DashMap<String, ValueEntry>>,
+    compression_threshold: usize,
+    cleaner: Arc<CleanerState>,
+}
+
+struct ValueEntry {
+    payload: Vec<u8>,
+    expires_at: Option<u64>,
+    compressed: bool,
+}
+
+struct CleanerState {
+    stop: Arc<AtomicBool>,
+    handle: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
 impl Store {
     pub fn new() -> Self {
+        Self::with_compression_threshold(DEFAULT_COMPRESSION_THRESHOLD)
+    }
+
+    pub fn with_compression_threshold(threshold: usize) -> Self {
+        let data = Arc::new(DashMap::new());
+        let cleaner = CleanerState::spawn(Arc::clone(&data));
         Self {
-            data: Arc::new(Mutex::new(HashMap::new())),
+            data,
+            compression_threshold: threshold,
+            cleaner: Arc::new(cleaner),
         }
     }
 
-    pub fn insert(&self, key: String, value: Vec<u8>, seconds: u64) {
-        let mut data = self.data.lock().unwrap();
-        println!("[STORE] Inserting key:{} expire secs: {}", key, seconds);
+    pub fn insert(&self, key: String, value: Vec<u8>, seconds: u64) -> Result<()> {
+        let expires_at = to_epoch_option(seconds)?;
+        let (payload, compressed) = compress_if_needed(&value, self.compression_threshold)?;
 
-        let mut e = GzEncoder::new(Vec::new(), Compression::default());
-        e.write_all(&value).unwrap();
-        let compressed_data = e.finish().unwrap();
-
-        if seconds == 0 {
-            data.insert(key, (compressed_data, 0));
-            return;
-        }
-
-        let expire_in = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            + seconds;
-
-        data.insert(key, (compressed_data, expire_in));
+        self.data.insert(
+            key,
+            ValueEntry {
+                payload,
+                expires_at,
+                compressed,
+            },
+        );
+        Ok(())
     }
 
-    pub fn get(&self, key: &str) -> Option<Vec<u8>> {
-        println!("[STORE] Getting {} ", key);
-        let mut data = self.data.lock().unwrap();
-
-        let value = data.get(key).is_none();
-
-        if value {
-            return None;
-        }
-
-        let value = data.get(key).unwrap();
-
-        let mut d = GzDecoder::new(&value.0[..]);
-        let mut decompressed_data = Vec::new();
-        d.read_to_end(&mut decompressed_data).unwrap();
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        if value.1 == 0 {
-            return Some(decompressed_data);
-        }
-
-        if now > value.1 {
-            data.remove(key);
-            return None;
-        }
-
-        return Some(decompressed_data);
-    }
-
-    pub fn delete(&self, key: &str) -> Option<String> {
-        println!("[STORE] Deleting {}", key);
-        let mut data = self.data.lock().unwrap();
-        if let Some(value) = data.get(key) {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_secs();
-
-            if value.1 != 0 && now > value.1 {
-                data.remove(key);
-                return None;
+    pub fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let now = current_epoch_seconds()?;
+        if let Some(entry) = self.data.get(key) {
+            if entry.is_expired(now) {
+                drop(entry);
+                self.data.remove(key);
+                return Ok(None);
             }
 
-            data.remove(key);
-            return Some(key.to_owned());
+            let data = decompress_if_needed(&entry.payload, entry.compressed)?;
+            return Ok(Some(data));
         }
-
-        None
+        Ok(None)
     }
 
-    pub fn expires_in(&self, key: &str) -> Option<u64> {
-        println!("[STORE] Getting expires_in {}", key);
-
-        let data = self.data.lock().unwrap();
-
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-
-        match data.get(key) {
-            Some(value) => {
-                if value.1 == 0 {
-                    return None;
-                }
-
-                if now > value.1 {
-                    return None;
-                }
-
-                return Some((Wrapping(value.1) - Wrapping(now)).0);
+    pub fn delete(&self, key: &str) -> Result<Option<String>> {
+        let now = current_epoch_seconds()?;
+        if let Some(entry) = self.data.get(key) {
+            if entry.is_expired(now) {
+                drop(entry);
+                self.data.remove(key);
+                return Ok(None);
             }
-            None => None,
+        }
+
+        match self.data.remove(key) {
+            Some((removed_key, entry)) => {
+                if entry.is_expired(now) {
+                    return Ok(None);
+                }
+                Ok(Some(removed_key))
+            }
+            None => Ok(None),
         }
     }
+
+    pub fn expires_in(&self, key: &str) -> Result<Option<u64>> {
+        let now = current_epoch_seconds()?;
+
+        if let Some(entry) = self.data.get(key) {
+            match entry.expires_at {
+                Some(expiry) if now < expiry => Ok(Some(expiry - now)),
+                Some(_) => {
+                    drop(entry);
+                    self.data.remove(key);
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_compressed(&self, key: &str) -> Option<bool> {
+        self.data.get(key).map(|entry| entry.compressed)
+    }
+}
+
+impl CleanerState {
+    fn spawn(data: Arc<DashMap<String, ValueEntry>>) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_signal = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            while !stop_signal.load(Ordering::Relaxed) {
+                purge_expired(&data);
+                thread::sleep(CLEANUP_INTERVAL);
+            }
+            purge_expired(&data);
+        });
+
+        Self {
+            stop,
+            handle: Mutex::new(Some(handle)),
+        }
+    }
+
+    fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut guard) = self.handle.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+impl Drop for CleanerState {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl ValueEntry {
+    fn is_expired(&self, now: u64) -> bool {
+        match self.expires_at {
+            Some(expiry) => now >= expiry,
+            None => false,
+        }
+    }
+}
+
+fn purge_expired(data: &DashMap<String, ValueEntry>) {
+    if let Ok(now) = current_epoch_seconds() {
+        data.retain(|_, value| !value.is_expired(now));
+    }
+}
+
+fn to_epoch_option(ttl: u64) -> Result<Option<u64>> {
+    if ttl == 0 {
+        return Ok(None);
+    }
+
+    Ok(Some(current_epoch_seconds()? + ttl))
+}
+
+fn current_epoch_seconds() -> Result<u64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
+}
+
+fn compress_if_needed(value: &[u8], threshold: usize) -> Result<(Vec<u8>, bool)> {
+    if value.len() < threshold {
+        return Ok((value.to_vec(), false));
+    }
+
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(value)?;
+    let compressed = encoder.finish()?;
+
+    if compressed.len() < value.len() {
+        Ok((compressed, true))
+    } else {
+        Ok((value.to_vec(), false))
+    }
+}
+
+fn decompress_if_needed(value: &[u8], compressed: bool) -> Result<Vec<u8>> {
+    if !compressed {
+        return Ok(value.to_vec());
+    }
+
+    let mut decoder = GzDecoder::new(value);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)?;
+    Ok(decompressed)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::thread;
     use std::time::Duration;
 
     #[test]
-    fn insert_and_get_without_expire() {
+    fn insert_and_get_without_expire() -> Result<()> {
         let store = Store::new();
-        store.insert("a".to_string(), b"b".to_vec(), 0);
-        assert_eq!(store.get("a"), Some(b"b".to_vec()));
+        store.insert("a".to_string(), b"b".to_vec(), 0)?;
+        assert_eq!(store.get("a")?, Some(b"b".to_vec()));
+        Ok(())
     }
 
     #[test]
-    fn value_expires() {
+    fn value_expires() -> Result<()> {
         let store = Store::new();
-        store.insert("a".to_string(), b"b".to_vec(), 1);
+        store.insert("a".to_string(), b"b".to_vec(), 1)?;
         thread::sleep(Duration::from_secs(2));
-        assert_eq!(store.get("a"), None);
+        assert_eq!(store.get("a")?, None);
+        Ok(())
     }
 
     #[test]
-    fn delete_and_expires_in_behaviour() {
+    fn delete_and_expires_in_behaviour() -> Result<()> {
         let store = Store::new();
-        store.insert("a".to_string(), b"b".to_vec(), 0);
-        assert_eq!(store.delete("a"), Some("a".to_string()));
-        assert_eq!(store.get("a"), None);
+        store.insert("a".to_string(), b"b".to_vec(), 0)?;
+        assert_eq!(store.delete("a")?, Some("a".to_string()));
+        assert_eq!(store.get("a")?, None);
 
-        store.insert("b".to_string(), b"c".to_vec(), 1);
-        assert!(store.expires_in("b").unwrap() <= 1);
+        store.insert("b".to_string(), b"c".to_vec(), 1)?;
+        if let Some(ttl) = store.expires_in("b")? {
+            assert!(ttl <= 1);
+        } else {
+            panic!("expected ttl");
+        }
         thread::sleep(Duration::from_secs(2));
-        assert_eq!(store.delete("b"), None);
-        assert_eq!(store.expires_in("b"), None);
-        assert_eq!(store.get("b"), None);
+        assert_eq!(store.delete("b")?, None);
+        assert_eq!(store.expires_in("b")?, None);
+        assert_eq!(store.get("b")?, None);
+        Ok(())
     }
 
     #[test]
-    fn delete_before_expiration_removes_value() {
+    fn delete_before_expiration_removes_value() -> Result<()> {
         let store = Store::new();
-        store.insert("a".to_string(), b"b".to_vec(), 10);
-        assert_eq!(store.delete("a"), Some("a".to_string()));
-        assert_eq!(store.get("a"), None);
+        store.insert("a".to_string(), b"b".to_vec(), 10)?;
+        assert_eq!(store.delete("a")?, Some("a".to_string()));
+        assert_eq!(store.get("a")?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn large_values_are_compressed() -> Result<()> {
+        let store = Store::new();
+        let large = vec![b'a'; DEFAULT_COMPRESSION_THRESHOLD * 4];
+        store.insert("big".to_string(), large.clone(), 0)?;
+        assert_eq!(store.is_compressed("big"), Some(true));
+        assert_eq!(store.get("big")?, Some(large));
+        Ok(())
+    }
+
+    #[test]
+    fn small_values_stay_uncompressed() -> Result<()> {
+        let store = Store::new();
+        store.insert("tiny".to_string(), b"hi".to_vec(), 0)?;
+        assert_eq!(store.is_compressed("tiny"), Some(false));
+        assert_eq!(store.get("tiny")?, Some(b"hi".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn background_worker_purges_expired_keys() -> Result<()> {
+        let store = Store::new();
+        store.insert("temp".to_string(), b"value".to_vec(), 1)?;
+        thread::sleep(Duration::from_secs(3));
+        assert_eq!(store.get("temp")?, None);
+        assert_eq!(store.len(), 0);
+        Ok(())
     }
 }
