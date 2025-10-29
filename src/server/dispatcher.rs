@@ -1,7 +1,5 @@
 use std::error::Error;
 
-use regex::{Captures, Regex};
-
 use super::{
     commands::{delete, expires_in, get, set},
     store::Store,
@@ -12,7 +10,7 @@ const GET: &str = "GET";
 const DELETE: &str = "DEL";
 const EXPIRES_IN: &str = "EXIN";
 
-pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Box<dyn Error>> {
+pub async fn dispatcher(command: String, store: &Store) -> Result<String, Box<dyn Error>> {
     let splited: Vec<&str> = command.splitn(3, ' ').collect();
 
     if splited.len() < 2 {
@@ -20,16 +18,13 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
     }
 
     let command_name = splited[0];
-
     let key = splited[1].to_string();
 
     match command_name {
-        SET => {
-            match parse_set_command(&command) {
-                Ok((key, value, seconds)) => set(&key, value, store, seconds),
-                Err(_) => Ok("error:set command invalid".into()),
-            }
-        }
+        SET => match parse_set_command(&command) {
+            Ok((key, value, seconds)) => set(&key, value, store, seconds),
+            Err(_) => Ok("error:set command invalid".into()),
+        },
         GET => get(&key, store),
         DELETE => delete(&key, store),
         EXPIRES_IN => expires_in(&key, store),
@@ -38,50 +33,52 @@ pub async fn dispatcher(command: String, store: &mut Store) -> Result<String, Bo
 }
 
 fn parse_set_command(input: &str) -> Result<(String, String, u64), Box<dyn Error>> {
-    let re = Regex::new(r"SET\s+(\S+)\s+(.+?)(?:\s+EX)(\s+\d+)$").unwrap();
+    const INVALID: &str = "error:set command invalid";
 
-    match re.captures(input) {
-        Some(captures) => {
-            match command_match_with_expire(captures) {
-                Ok((key, value, seconds)) => Ok((key, value, seconds)),
-                Err(e) => Err(e),
+    let mut parts = input.splitn(3, ' ');
+
+    if parts.next() != Some(SET) {
+        return Err(INVALID.into());
+    }
+
+    let key = parts.next().ok_or(INVALID)?;
+    if key.is_empty() {
+        return Err(INVALID.into());
+    }
+
+    let remainder = parts.next().ok_or(INVALID)?.trim();
+    if remainder.is_empty() {
+        return Err(INVALID.into());
+    }
+
+    let mut value = remainder.to_string();
+    let mut seconds = 0;
+
+    if let Some(idx) = remainder.rfind(" EX ") {
+        let ttl_fragment = remainder[idx + 4..].trim();
+        if ttl_fragment.is_empty() {
+            return Err(INVALID.into());
+        }
+
+        let ttl_tokens: Vec<&str> = ttl_fragment.split_whitespace().collect();
+        if ttl_tokens.len() == 1 {
+            match ttl_tokens[0].parse::<u64>() {
+                Ok(parsed_seconds) => {
+                    let candidate_value = remainder[..idx].trim_end();
+                    if candidate_value.is_empty() {
+                        return Err(INVALID.into());
+                    }
+                    value = candidate_value.to_string();
+                    seconds = parsed_seconds;
+                }
+                Err(_) => return Err(INVALID.into()),
             }
-        }
-        None => {
-            match command_not_match_with_expire(input) {
-                Ok((key, value, seconds)) => Ok((key, value, seconds)),
-                Err(e) => Err(e),
-            }
+        } else if ttl_tokens.len() == 0 {
+            return Err(INVALID.into());
         }
     }
-}
 
-fn command_match_with_expire(captures: Captures) -> Result<(String, String, u64), Box<dyn Error>> {
-    let key = captures[1].to_string();
-    let value = captures[2].to_string();
-
-    let expire = captures.get(3).is_some();
-
-    if expire {
-        Ok((key, value, captures[3].trim().parse::<u64>().unwrap()))
-    } else {
-        Ok((key, value, 0))
-    }
-}
-
-fn command_not_match_with_expire(input: &str) -> Result<(String, String, u64), Box<dyn Error>> {
-    let re = Regex::new(r"SET\s+(\S+)\s+(.+)(?:\s+EX\s+(\d+))?").unwrap();
-    let captures = re.captures(input);
-
-    match captures {
-        Some(captures) => {
-            let key = captures[1].into();
-            let value = captures[2].to_string();
-
-            Ok((key, value, 0))
-        }
-        None => Err("error:invalid command".into()),
-    }
+    Ok((key.to_string(), value, seconds))
 }
 
 #[cfg(test)]
@@ -102,28 +99,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_set_with_invalid_expire() {
+        assert!(parse_set_command("SET k v EX nope").is_err());
+    }
+
+    #[test]
     fn parse_set_invalid() {
         assert!(parse_set_command("SET k").is_err());
     }
 
     #[tokio::test]
     async fn dispatcher_set_get() {
-        let mut store = Store::new();
-        assert_eq!(dispatcher("SET a 1".into(), &mut store).await.unwrap(), "ok");
-        assert_eq!(dispatcher("GET a".into(), &mut store).await.unwrap(), "1");
+        let store = Store::new();
+        assert_eq!(dispatcher("SET a 1".into(), &store).await.unwrap(), "ok");
+        assert_eq!(dispatcher("GET a".into(), &store).await.unwrap(), "1");
     }
 
     #[tokio::test]
     async fn dispatcher_expiration() {
-        let mut store = Store::new();
-        assert_eq!(dispatcher("SET a 1 EX 1".into(), &mut store).await.unwrap(), "ok");
+        let store = Store::new();
+        assert_eq!(
+            dispatcher("SET a 1 EX 1".into(), &store).await.unwrap(),
+            "ok"
+        );
         sleep(Duration::from_secs(2)).await;
-        assert_eq!(dispatcher("GET a".into(), &mut store).await.unwrap(), "null");
+        assert_eq!(dispatcher("GET a".into(), &store).await.unwrap(), "null");
     }
 
     #[tokio::test]
     async fn dispatcher_invalid_command() {
-        let mut store = Store::new();
-        assert_eq!(dispatcher("NOOP".into(), &mut store).await.unwrap(), "error:invalid command");
+        let store = Store::new();
+        assert_eq!(
+            dispatcher("NOOP".into(), &store).await.unwrap(),
+            "error:invalid command"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatcher_handles_bad_expiration_without_crashing() {
+        let store = Store::new();
+        assert_eq!(
+            dispatcher("SET a v EX nope".into(), &store)
+                .await
+                .unwrap(),
+            "error:set command invalid"
+        );
     }
 }

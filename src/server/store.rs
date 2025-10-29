@@ -9,6 +9,7 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use flate2::read::GzDecoder;
 
+#[derive(Clone)]
 pub struct Store {
     data: Arc<Mutex<HashMap<String, (Vec<u8>, u64)>>>,
 }
@@ -78,27 +79,22 @@ impl Store {
     pub fn delete(&self, key: &str) -> Option<String> {
         println!("[STORE] Deleting {}", key);
         let mut data = self.data.lock().unwrap();
-        if data.contains_key(key) {
-
-            let value = data.get(key).unwrap();
-
+        if let Some(value) = data.get(key) {
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_secs();
 
-            if value.1 == 0 {
+            if value.1 != 0 && now > value.1 {
                 data.remove(key);
-                return Some(key.to_owned());
+                return None;
             }
 
-            if now > value.1 {
-                data.remove(key);
-                return None
-            }
+            data.remove(key);
+            return Some(key.to_owned());
         }
 
-        return None;
+        None
     }
 
     pub fn expires_in(&self, key: &str) -> Option<u64> {
@@ -162,5 +158,13 @@ mod tests {
         assert_eq!(store.delete("b"), None);
         assert_eq!(store.expires_in("b"), None);
         assert_eq!(store.get("b"), None);
+    }
+
+    #[test]
+    fn delete_before_expiration_removes_value() {
+        let store = Store::new();
+        store.insert("a".to_string(), b"b".to_vec(), 10);
+        assert_eq!(store.delete("a"), Some("a".to_string()));
+        assert_eq!(store.get("a"), None);
     }
 }

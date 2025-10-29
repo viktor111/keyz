@@ -11,5 +11,4 @@ readme = "README.md"
 
 [dependencies]
 tokio = { version = "1.45.1", features = ["full", "time"] }
-regex = "1.11.1"
 flate2 = "1.1.2"
