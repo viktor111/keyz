@@ -1,0 +1,16 @@
+[server]
+host = "127.0.0.1"
+port = 7667
+
+[protocol]
+max_message_bytes = 4_194_304
+idle_timeout_secs = 30
+close_command = "CLOSE"
+timeout_response = "error:timeout"
+invalid_command_response = "error:invalid command"
+
+[store]
+compression_threshold = 512
+cleanup_interval_ms = 250
+# Uncomment to apply a default TTL (in seconds) when commands omit EX
+# default_ttl_secs = 60

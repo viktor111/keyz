@@ -8,8 +8,6 @@ use tokio::{
 
 use crate::server::error::{KeyzError, Result};
 
-const MAX_MESSAGE_SIZE: u32 = 4 * 1024 * 1024; // 4 MiB cap to prevent allocation abuse.
-
 pub async fn create_listener(addr: SocketAddr) -> Result<TcpListener> {
     TcpListener::bind(addr).await.map_err(KeyzError::from)
 }
@@ -20,7 +18,7 @@ pub async fn listener_accept_conn(
     listener.accept().await.map_err(KeyzError::from)
 }
 
-pub async fn read_message(stream: &mut TcpStream) -> Result<String> {
+pub async fn read_message(stream: &mut TcpStream, max_len: u32) -> Result<String> {
     let mut len_bytes = [0; 4];
     stream
         .read_exact(&mut len_bytes)
@@ -28,7 +26,7 @@ pub async fn read_message(stream: &mut TcpStream) -> Result<String> {
         .map_err(map_io_error)?;
 
     let len = u32::from_be_bytes(len_bytes);
-    if len == 0 || len > MAX_MESSAGE_SIZE {
+    if len == 0 || len > max_len {
         return Err(KeyzError::InvalidCommand("message length out of bounds".into()));
     }
 
@@ -102,7 +100,7 @@ mod tests {
         let (mut server_stream, _) = listener_accept_conn(&listener).await?;
 
         write_message(&mut client, "hello").await?;
-        let msg = read_message(&mut server_stream).await?;
+        let msg = read_message(&mut server_stream, 4 * 1024 * 1024).await?;
         assert_eq!(msg, "hello");
 
         sleep(Duration::from_millis(10)).await; // ensure cleanup

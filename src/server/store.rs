@@ -11,15 +11,13 @@ use std::{
 use dashmap::DashMap;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 
-use crate::server::error::{KeyzError, Result};
-
-const DEFAULT_COMPRESSION_THRESHOLD: usize = 512;
-const CLEANUP_INTERVAL: Duration = Duration::from_millis(250);
+use crate::{config::StoreConfig, server::error::Result};
 
 #[derive(Clone)]
 pub struct Store {
     data: Arc<DashMap<String, ValueEntry>>,
     compression_threshold: usize,
+    default_ttl: Option<u64>,
     cleaner: Arc<CleanerState>,
 }
 
@@ -36,21 +34,24 @@ struct CleanerState {
 
 impl Store {
     pub fn new() -> Self {
-        Self::with_compression_threshold(DEFAULT_COMPRESSION_THRESHOLD)
+        Self::with_config(StoreConfig::default())
     }
 
-    pub fn with_compression_threshold(threshold: usize) -> Self {
+    pub fn with_config(config: StoreConfig) -> Self {
         let data = Arc::new(DashMap::new());
-        let cleaner = CleanerState::spawn(Arc::clone(&data));
+        let interval = Duration::from_millis(config.cleanup_interval_ms);
+        let cleaner = CleanerState::spawn(Arc::clone(&data), interval);
+
         Self {
             data,
-            compression_threshold: threshold,
+            compression_threshold: config.compression_threshold,
+            default_ttl: config.default_ttl_secs,
             cleaner: Arc::new(cleaner),
         }
     }
 
     pub fn insert(&self, key: String, value: Vec<u8>, seconds: u64) -> Result<()> {
-        let expires_at = to_epoch_option(seconds)?;
+        let expires_at = self.ttl_deadline(seconds)?;
         let (payload, compressed) = compress_if_needed(&value, self.compression_threshold)?;
 
         self.data.insert(
@@ -126,17 +127,31 @@ impl Store {
     pub(crate) fn is_compressed(&self, key: &str) -> Option<bool> {
         self.data.get(key).map(|entry| entry.compressed)
     }
+
+    fn ttl_deadline(&self, seconds: u64) -> Result<Option<u64>> {
+        let ttl = if seconds == 0 {
+            self.default_ttl.unwrap_or(0)
+        } else {
+            seconds
+        };
+
+        if ttl == 0 {
+            return Ok(None);
+        }
+
+        Ok(Some(current_epoch_seconds()? + ttl))
+    }
 }
 
 impl CleanerState {
-    fn spawn(data: Arc<DashMap<String, ValueEntry>>) -> Self {
+    fn spawn(data: Arc<DashMap<String, ValueEntry>>, interval: Duration) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_signal = Arc::clone(&stop);
 
         let handle = thread::spawn(move || {
             while !stop_signal.load(Ordering::Relaxed) {
                 purge_expired(&data);
-                thread::sleep(CLEANUP_INTERVAL);
+                thread::sleep(interval);
             }
             purge_expired(&data);
         });
@@ -176,14 +191,6 @@ fn purge_expired(data: &DashMap<String, ValueEntry>) {
     if let Ok(now) = current_epoch_seconds() {
         data.retain(|_, value| !value.is_expired(now));
     }
-}
-
-fn to_epoch_option(ttl: u64) -> Result<Option<u64>> {
-    if ttl == 0 {
-        return Ok(None);
-    }
-
-    Ok(Some(current_epoch_seconds()? + ttl))
 }
 
 fn current_epoch_seconds() -> Result<u64> {
@@ -271,7 +278,8 @@ mod tests {
     #[test]
     fn large_values_are_compressed() -> Result<()> {
         let store = Store::new();
-        let large = vec![b'a'; DEFAULT_COMPRESSION_THRESHOLD * 4];
+        let threshold = StoreConfig::default().compression_threshold;
+        let large = vec![b'a'; threshold * 4];
         store.insert("big".to_string(), large.clone(), 0)?;
         assert_eq!(store.is_compressed("big"), Some(true));
         assert_eq!(store.get("big")?, Some(large));
@@ -289,11 +297,28 @@ mod tests {
 
     #[test]
     fn background_worker_purges_expired_keys() -> Result<()> {
-        let store = Store::new();
+        let store = Store::with_config(StoreConfig {
+            compression_threshold: StoreConfig::default().compression_threshold,
+            cleanup_interval_ms: 50,
+            default_ttl_secs: Some(1),
+        });
         store.insert("temp".to_string(), b"value".to_vec(), 1)?;
         thread::sleep(Duration::from_secs(3));
         assert_eq!(store.get("temp")?, None);
         assert_eq!(store.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn default_ttl_applies_when_zero() -> Result<()> {
+        let store = Store::with_config(StoreConfig {
+            compression_threshold: StoreConfig::default().compression_threshold,
+            cleanup_interval_ms: StoreConfig::default().cleanup_interval_ms,
+            default_ttl_secs: Some(1),
+        });
+        store.insert("ttl".to_string(), b"value".to_vec(), 0)?;
+        thread::sleep(Duration::from_secs(2));
+        assert_eq!(store.get("ttl")?, None);
         Ok(())
     }
 }

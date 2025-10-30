@@ -1,5 +1,9 @@
+mod config;
 mod server;
 
+use std::sync::Arc;
+
+use config::Config;
 use server::error::Result;
 
 #[tokio::main]
@@ -10,10 +14,13 @@ async fn main() {
 }
 
 async fn run() -> Result<()> {
-    let socket_addr =
-        server::helpers::socket_address_from_string_ip("127.0.0.1:7667".to_string())?;
+    let config = Config::load::<&str>(None)?;
+    let socket_addr = config.server.socket_addr()?;
     let listener = server::helpers::create_listener(socket_addr).await?;
 
-    server::init::start(&listener).await;
+    let store = server::store::Store::with_config(config.store.clone());
+    let protocol = Arc::new(config.protocol.clone());
+
+    server::init::start(&listener, store, protocol).await;
     Ok(())
 }

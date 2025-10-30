@@ -10,6 +10,16 @@ pub enum KeyzError {
     Io(#[from] std::io::Error),
     #[error("Invalid socket address")]
     InvalidSocketAddress,
+    #[error("Config IO error at {path}: {source}")]
+    ConfigIo {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("Config parse error: {0}")]
+    ConfigParse(String),
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String),
     #[error("Invalid command: {0}")]
     InvalidCommand(String),
     #[error("Invalid UTF-8 data: {0}")]
