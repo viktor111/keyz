@@ -1,32 +1,64 @@
 use super::{
-    commands::{delete, expires_in, get, set},
+    commands::{delete, expires_in, get, info, set},
     store::Store,
 };
-use crate::server::error::{KeyzError, Result};
+use crate::{
+    config::ProtocolConfig,
+    server::error::{KeyzError, Result},
+};
 
 const SET: &str = "SET";
 const GET: &str = "GET";
 const DELETE: &str = "DEL";
 const EXPIRES_IN: &str = "EXIN";
+const INFO: &str = "INFO";
 
-pub async fn dispatcher(command: String, store: &Store) -> Result<String> {
-    let splited: Vec<&str> = command.splitn(3, ' ').collect();
-
-    if splited.len() < 2 {
+pub async fn dispatcher(
+    command: String,
+    store: &Store,
+    protocol: &ProtocolConfig,
+) -> Result<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
         return Ok("error:invalid command".into());
     }
 
-    let command_name = splited[0];
-    let key = splited[1].to_string();
+    let mut parts = trimmed.splitn(2, ' ');
+    let command_name = parts.next().unwrap();
+    let remainder = parts.next();
 
     match command_name {
-        SET => match parse_set_command(&command) {
+        INFO => {
+            if let Some(extra) = remainder {
+                if !extra.trim().is_empty() {
+                    return Ok("error:invalid command".into());
+                }
+            }
+            info(store, protocol)
+        }
+        SET => match parse_set_command(trimmed) {
             Ok((key, value, seconds)) => set(&key, value, store, seconds),
             Err(_) => Ok("error:set command invalid".into()),
         },
-        GET => get(&key, store),
-        DELETE => delete(&key, store),
-        EXPIRES_IN => expires_in(&key, store),
+        GET | DELETE | EXPIRES_IN => {
+            let key = match remainder {
+                Some(raw) => {
+                    let key_trimmed = raw.trim();
+                    if key_trimmed.is_empty() || key_trimmed.split_whitespace().nth(1).is_some() {
+                        return Ok("error:invalid command".into());
+                    }
+                    key_trimmed.to_string()
+                }
+                None => return Ok("error:invalid command".into()),
+            };
+
+            match command_name {
+                GET => get(&key, store),
+                DELETE => delete(&key, store),
+                EXPIRES_IN => expires_in(&key, store),
+                _ => unreachable!(),
+            }
+        }
         _ => Ok("error:invalid command".into()),
     }
 }
@@ -88,6 +120,7 @@ fn parse_set_command(input: &str) -> Result<(String, String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProtocolConfig;
     use tokio::time::{sleep, Duration};
 
     #[test]
@@ -117,28 +150,31 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_set_get() -> Result<()> {
         let store = Store::new();
-        assert_eq!(dispatcher("SET a 1".into(), &store).await?, "ok");
-        assert_eq!(dispatcher("GET a".into(), &store).await?, "1");
+        let protocol = ProtocolConfig::default();
+        assert_eq!(dispatcher("SET a 1".into(), &store, &protocol).await?, "ok");
+        assert_eq!(dispatcher("GET a".into(), &store, &protocol).await?, "1");
         Ok(())
     }
 
     #[tokio::test]
     async fn dispatcher_expiration() -> Result<()> {
         let store = Store::new();
+        let protocol = ProtocolConfig::default();
         assert_eq!(
-            dispatcher("SET a 1 EX 1".into(), &store).await?,
+            dispatcher("SET a 1 EX 1".into(), &store, &protocol).await?,
             "ok"
         );
         sleep(Duration::from_secs(2)).await;
-        assert_eq!(dispatcher("GET a".into(), &store).await?, "null");
+        assert_eq!(dispatcher("GET a".into(), &store, &protocol).await?, "null");
         Ok(())
     }
 
     #[tokio::test]
     async fn dispatcher_invalid_command() -> Result<()> {
         let store = Store::new();
+        let protocol = ProtocolConfig::default();
         assert_eq!(
-            dispatcher("NOOP".into(), &store).await?,
+            dispatcher("NOOP".into(), &store, &protocol).await?,
             "error:invalid command"
         );
         Ok(())
@@ -147,8 +183,20 @@ mod tests {
     #[tokio::test]
     async fn dispatcher_handles_bad_expiration_without_crashing() -> Result<()> {
         let store = Store::new();
-        let response = dispatcher("SET a v EX nope".into(), &store).await?;
+        let protocol = ProtocolConfig::default();
+        let response = dispatcher("SET a v EX nope".into(), &store, &protocol).await?;
         assert_eq!(response, "error:set command invalid");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dispatcher_info_returns_json() -> Result<()> {
+        let store = Store::new();
+        let protocol = ProtocolConfig::default();
+        let response = dispatcher("INFO".into(), &store, &protocol).await?;
+        let value: serde_json::Value =
+            serde_json::from_str(&response).expect("INFO should return valid JSON");
+        assert!(value["store"]["uptime_secs"].as_f64().is_some());
         Ok(())
     }
 }

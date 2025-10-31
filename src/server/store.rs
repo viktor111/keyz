@@ -10,6 +10,7 @@ use std::{
 
 use dashmap::DashMap;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use serde::Serialize;
 
 use crate::{config::StoreConfig, server::error::Result};
 
@@ -19,6 +20,8 @@ pub struct Store {
     compression_threshold: usize,
     default_ttl: Option<u64>,
     cleaner: Arc<CleanerState>,
+    cleanup_interval_ms: u64,
+    started_at: std::time::Instant,
 }
 
 struct ValueEntry {
@@ -47,6 +50,8 @@ impl Store {
             compression_threshold: config.compression_threshold,
             default_ttl: config.default_ttl_secs,
             cleaner: Arc::new(cleaner),
+            cleanup_interval_ms: config.cleanup_interval_ms,
+            started_at: std::time::Instant::now(),
         }
     }
 
@@ -121,6 +126,21 @@ impl Store {
 
     pub fn len(&self) -> usize {
         self.data.len()
+    }
+
+    pub fn stats(&self) -> StoreStats {
+        let keys = self.data.len();
+        let compressed_keys = self.data.iter().filter(|entry| entry.compressed).count();
+        let uptime_secs = self.started_at.elapsed().as_secs_f64();
+
+        StoreStats {
+            keys,
+            compressed_keys,
+            compression_threshold: self.compression_threshold,
+            default_ttl_secs: self.default_ttl,
+            cleanup_interval_ms: self.cleanup_interval_ms,
+            uptime_secs,
+        }
     }
 
     #[cfg(test)]
@@ -224,6 +244,16 @@ fn decompress_if_needed(value: &[u8], compressed: bool) -> Result<Vec<u8>> {
     Ok(decompressed)
 }
 
+#[derive(Debug, Serialize)]
+pub struct StoreStats {
+    pub keys: usize,
+    pub compressed_keys: usize,
+    pub compression_threshold: usize,
+    pub default_ttl_secs: Option<u64>,
+    pub cleanup_interval_ms: u64,
+    pub uptime_secs: f64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +322,24 @@ mod tests {
         store.insert("tiny".to_string(), b"hi".to_vec(), 0)?;
         assert_eq!(store.is_compressed("tiny"), Some(false));
         assert_eq!(store.get("tiny")?, Some(b"hi".to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn stats_reflects_store_state() -> Result<()> {
+        let store = Store::new();
+        store.insert("a".to_string(), b"value".to_vec(), 0)?;
+        let stats = store.stats();
+        assert_eq!(stats.keys, 1);
+        assert_eq!(
+            stats.compression_threshold,
+            StoreConfig::default().compression_threshold
+        );
+        assert_eq!(
+            stats.cleanup_interval_ms,
+            StoreConfig::default().cleanup_interval_ms
+        );
+        assert!(stats.uptime_secs >= 0.0);
         Ok(())
     }
 

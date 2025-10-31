@@ -28,6 +28,7 @@
   | `DEL <key>` | Delete entry. | Deleted key or `"null"` when missing/expired. |
   | `EXIN <key>` | Query remaining TTL. | Seconds remaining or `"null"` if infinite/missing. |
   | `CLOSE` | Graceful connection close command (configurable). | `"Closing connection"` then socket shutdown. |
+  | `INFO` | Emit server/store metrics. | JSON payload |
 - Invalid commands trigger `ProtocolConfig.invalid_command_response`. Idle clients receive `timeout_response` and the server drops the connection.
 
 ## Store Implementation (`src/server/store.rs`)
@@ -41,7 +42,7 @@
   - `get`: lazy-expiration check on read.
   - `delete`: removes key, skipping expired entries.
   - `expires_in`: reports remaining TTL.
-  - `len` and `is_compressed` assist diagnostics/tests.
+  - `len`, `is_compressed`, and `stats` assist diagnostics/tests.
 
 ## Connection Lifecycle (`src/server/init.rs`)
 - Accept loop retries with a short backoff on errors (`ACCEPT_BACKOFF`).
@@ -65,6 +66,19 @@
 - **Local dev**: `cargo run` (or `cargo run --release`) starts the server with defaults. Provide alternate settings by editing `keyz.toml` or setting the `KEYZ_CONFIG` environment variable to another TOML file path before launch.
 - **Configuration sample**: see `keyz.toml` for documented defaults. Override fields per section (`[server]`, `[protocol]`, `[store]`).
 - **Docker**: build and run via the provided `Dockerfile`. The release binary is staged into a slim Debian image exposing port `7667`.
+
+## CLI Tooling
+- `keyz-cli` is compiled alongside the server (`cargo run --bin keyz-cli -- --help`).
+- Global flags mirror configuration selection (`--config`, `--host`, `--port`, `--json`).
+- Subcommands:
+  - `exec`: send ad-hoc commands, with `--raw` for literal frames.
+  - `commands`: list protocol verbs and usage notes.
+  - `config show|init`: inspect effective configuration or scaffold a template.
+  - `status`: run one-off or continuous health checks (`--watch`), reporting latency.
+  - `interactive`: provides a readline shell with `:help`, `:commands`, and history persistence.
+  - `batch`: replay commands from files/stdin with optional `--stop-on-error`.
+  - `metrics`: probes the `INFO` command and pretty-prints JSON payloads when available.
+- Intended to stay forward-compatible as new protocol verbs or telemetry land on the server.
 
 ## Operational Considerations
 - The server is single-process and in-memory; restart loses state.

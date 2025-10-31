@@ -16,11 +16,31 @@
 
 ### Run Locally
 ```bash
-cargo run
+# run the TCP server
+cargo run --bin keyz
 # or for optimized builds
-cargo run --release
+cargo run --release --bin keyz
 ```
 By default the server binds to `127.0.0.1:7667`. Update `keyz.toml` or point the `KEYZ_CONFIG` environment variable at another TOML file to override defaults.
+> Note: the workspace builds both the server and CLI binaries, so always pass `--bin` to choose which target to launch.
+
+### Client CLI
+The companion CLI `keyz-cli` ships with the crate and provides a rich interface for interacting with the server.
+
+```bash
+cargo run --bin keyz-cli -- --help
+# run a single command (after the second `--` args go to the CLI)
+cargo run --bin keyz-cli -- exec GET foo
+```
+
+Highlights:
+- `exec`: send a single command (`keyz-cli exec SET foo bar EX 10` or `--raw "GET foo"`).
+- `commands`: list supported verbs and optional notes (`--verbose`).
+- `config show`: inspect the effective configuration and whether it came from disk; `config init` scaffolds a `keyz.toml`.
+- `status`: probe server health once or continuously with `--watch`.
+- `interactive`: launch a readline-powered REPL with shortcuts like `:help` and `:commands`.
+- `batch`: stream commands from stdin or a file, with `--stop-on-error` and `--json` for scripting.
+- `metrics`: fetch diagnostics via the `INFO` command and pretty-print JSON, falling back gracefully when unsupported.
 
 ### Docker
 ```bash
@@ -53,6 +73,7 @@ All requests and responses are framed with a 4-byte big-endian length header. Co
 | `DEL <key>` | Delete a key. | Deleted key or `null` |
 | `EXIN <key>` | Remaining TTL for a key. | Seconds or `null` |
 | `CLOSE` | Graceful connection termination. | `Closing connection` |
+| `INFO` | Emit JSON describing server/store metrics. | JSON payload |
 
 Invalid commands receive the configured `invalid_command_response`, and idle connections receive `timeout_response` and are dropped.
 
@@ -67,7 +88,7 @@ cargo test
 - `src/config.rs`: typed configuration loader and validation logic.
 - `src/server/init.rs`: accept loop and per-connection protocol handling.
 - `src/server/dispatcher.rs`: parses commands and routes to handlers.
-- `src/server/commands.rs`: implementations of `SET`, `GET`, `DEL`, and `EXIN`.
+- `src/server/commands.rs`: implementations of `SET`, `GET`, `DEL`, `EXIN`, and `INFO`.
 - `src/server/store.rs`: in-memory store with TTL, compression, and background cleanup.
 - `docs/`: supplemental documentation, including the architecture deep dive.
 

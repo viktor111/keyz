@@ -26,8 +26,10 @@ pub async fn start(listener: &TcpListener, store: Store, protocol: Arc<ProtocolC
                 let protocol = Arc::clone(&protocol);
                 tokio::spawn(async move {
                     if let Err(err) = handle_connection(stream, store, protocol).await {
-                        if !matches!(err, KeyzError::ClientDisconnected | KeyzError::ClientTimeout)
-                        {
+                        if !matches!(
+                            err,
+                            KeyzError::ClientDisconnected | KeyzError::ClientTimeout
+                        ) {
                             eprintln!("connection terminated with error: {err}");
                         }
                     }
@@ -51,25 +53,22 @@ async fn handle_connection(
     let close_command = protocol.close_command.clone();
     let timeout_response = protocol.timeout_response.clone();
     let invalid_response = protocol.invalid_command_response.clone();
-    drop(protocol);
 
     loop {
-        let command =
-            match timeout(idle_timeout, helpers::read_message(&mut stream, max_len)).await {
-                Ok(Ok(command)) => command,
-                Ok(Err(KeyzError::ClientDisconnected)) => {
-                    return Err(KeyzError::ClientDisconnected)
-                }
-                Ok(Err(KeyzError::InvalidCommand(_))) => {
-                    send_response(&mut stream, &invalid_response).await?;
-                    continue;
-                }
-                Ok(Err(err)) => return Err(err),
-                Err(_) => {
-                    let _ = send_response(&mut stream, &timeout_response).await;
-                    return Err(KeyzError::ClientTimeout);
-                }
-            };
+        let command = match timeout(idle_timeout, helpers::read_message(&mut stream, max_len)).await
+        {
+            Ok(Ok(command)) => command,
+            Ok(Err(KeyzError::ClientDisconnected)) => return Err(KeyzError::ClientDisconnected),
+            Ok(Err(KeyzError::InvalidCommand(_))) => {
+                send_response(&mut stream, &invalid_response).await?;
+                continue;
+            }
+            Ok(Err(err)) => return Err(err),
+            Err(_) => {
+                let _ = send_response(&mut stream, &timeout_response).await;
+                return Err(KeyzError::ClientTimeout);
+            }
+        };
 
         if command.trim().is_empty() {
             send_response(&mut stream, &invalid_response).await?;
@@ -82,7 +81,7 @@ async fn handle_connection(
             return Ok(());
         }
 
-        let response = match dispatcher(command, &store).await {
+        let response = match dispatcher(command, &store, protocol.as_ref()).await {
             Ok(response) => response,
             Err(KeyzError::InvalidCommand(_)) => invalid_response.clone(),
             Err(err) => return Err(err),

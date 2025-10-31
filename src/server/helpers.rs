@@ -12,9 +12,7 @@ pub async fn create_listener(addr: SocketAddr) -> Result<TcpListener> {
     TcpListener::bind(addr).await.map_err(KeyzError::from)
 }
 
-pub async fn listener_accept_conn(
-    listener: &TcpListener,
-) -> Result<(TcpStream, SocketAddr)> {
+pub async fn listener_accept_conn(listener: &TcpListener) -> Result<(TcpStream, SocketAddr)> {
     listener.accept().await.map_err(KeyzError::from)
 }
 
@@ -27,14 +25,13 @@ pub async fn read_message(stream: &mut TcpStream, max_len: u32) -> Result<String
 
     let len = u32::from_be_bytes(len_bytes);
     if len == 0 || len > max_len {
-        return Err(KeyzError::InvalidCommand("message length out of bounds".into()));
+        return Err(KeyzError::InvalidCommand(
+            "message length out of bounds".into(),
+        ));
     }
 
     let mut buffer = vec![0; len as usize];
-    stream
-        .read_exact(&mut buffer)
-        .await
-        .map_err(map_io_error)?;
+    stream.read_exact(&mut buffer).await.map_err(map_io_error)?;
 
     let message = String::from_utf8(buffer)?;
     Ok(message)
@@ -44,10 +41,7 @@ pub async fn write_message(stream: &mut TcpStream, message: &str) -> Result<()> 
     let len = message.len() as u32;
     let len_bytes = len.to_be_bytes();
 
-    stream
-        .write_all(&len_bytes)
-        .await
-        .map_err(map_io_error)?;
+    stream.write_all(&len_bytes).await.map_err(map_io_error)?;
     stream
         .write_all(message.as_bytes())
         .await
@@ -56,8 +50,7 @@ pub async fn write_message(stream: &mut TcpStream, message: &str) -> Result<()> 
 }
 
 pub fn socket_address_from_string_ip(ip: String) -> Result<SocketAddr> {
-    ip.parse()
-        .map_err(|_| KeyzError::InvalidSocketAddress)
+    ip.parse().map_err(|_| KeyzError::InvalidSocketAddress)
 }
 
 fn map_io_error(err: std::io::Error) -> KeyzError {

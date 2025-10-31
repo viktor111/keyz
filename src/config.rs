@@ -1,6 +1,5 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     net::{SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     time::Duration,
@@ -12,6 +11,20 @@ use crate::server::error::{KeyzError, Result};
 
 const DEFAULT_CONFIG_PATH: &str = "keyz.toml";
 const ENV_CONFIG_PATH: &str = "KEYZ_CONFIG";
+
+#[derive(Debug, Clone)]
+pub enum ConfigSource {
+    ExplicitPath(PathBuf),
+    Env(PathBuf),
+    DefaultFile(PathBuf),
+    Defaults,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigContext {
+    pub config: Config,
+    pub source: ConfigSource,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -35,37 +48,68 @@ impl Default for Config {
 
 impl Config {
     pub fn load<P: AsRef<Path>>(path: Option<P>) -> Result<Self> {
+        let ConfigContext { config, source } = Self::load_with_source(path)?;
+        match &source {
+            ConfigSource::ExplicitPath(path)
+            | ConfigSource::Env(path)
+            | ConfigSource::DefaultFile(path) => {
+                println!(
+                    "[config] Loaded configuration from {}",
+                    path.to_string_lossy()
+                );
+            }
+            ConfigSource::Defaults => {
+                println!("[config] No configuration file found; using defaults");
+            }
+        }
+        Ok(config)
+    }
+
+    pub fn load_with_source<P: AsRef<Path>>(path: Option<P>) -> Result<ConfigContext> {
         let explicit_path = path.map(|p| p.as_ref().to_path_buf());
         let env_path = env::var(ENV_CONFIG_PATH).ok().map(PathBuf::from);
 
-        if let Some(path) = explicit_path.or(env_path) {
-            let content = fs::read_to_string(&path).map_err(|source| KeyzError::ConfigIo {
-                path: path.to_string_lossy().to_string(),
-                source,
-            })?;
-            let config = Self::from_toml_str(&content)?;
-            println!(
-                "[config] Loaded configuration from {}",
-                path.to_string_lossy()
-            );
-            return Ok(config);
+        if let Some(path) = explicit_path {
+            let config = Self::load_from_path(&path)?;
+            return Ok(ConfigContext {
+                config,
+                source: ConfigSource::ExplicitPath(path),
+            });
+        }
+
+        if let Some(path) = env_path {
+            let config = Self::load_from_path(&path)?;
+            return Ok(ConfigContext {
+                config,
+                source: ConfigSource::Env(path),
+            });
         }
 
         match fs::read_to_string(DEFAULT_CONFIG_PATH) {
             Ok(content) => {
                 let config = Self::from_toml_str(&content)?;
-                println!("[config] Loaded configuration from {DEFAULT_CONFIG_PATH}");
-                Ok(config)
+                Ok(ConfigContext {
+                    config,
+                    source: ConfigSource::DefaultFile(PathBuf::from(DEFAULT_CONFIG_PATH)),
+                })
             }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                println!("[config] No configuration file found; using defaults");
-                Ok(Self::default())
-            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(ConfigContext {
+                config: Self::default(),
+                source: ConfigSource::Defaults,
+            }),
             Err(source) => Err(KeyzError::ConfigIo {
                 path: DEFAULT_CONFIG_PATH.to_string(),
                 source,
             }),
         }
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self> {
+        let content = fs::read_to_string(path).map_err(|source| KeyzError::ConfigIo {
+            path: path.to_string_lossy().to_string(),
+            source,
+        })?;
+        Self::from_toml_str(&content)
     }
 
     pub fn from_toml_str(input: &str) -> Result<Self> {
