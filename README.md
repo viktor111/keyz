@@ -5,9 +5,11 @@
 ## Features
 - Async TCP handling driven by Tokio with per-connection tasks.
 - Length-prefixed protocol that guards against partial reads and enforces message size limits.
-- `DashMap`-based in-memory store with optional gzip compression and automatic cleanup of expired keys.
+- **Pluggable storage backends**: in-memory (`DashMap`) or persistent disk with a custom `.keyz` file format.
+- **Disk backend**: micro-partitioned storage with automatic key clustering, AES-256-GCM encryption at rest, and an LRU read-through cache.
+- Optional gzip compression and automatic cleanup of expired keys.
 - Configurable responses, timeouts, and command vocabulary through a single TOML file.
-- Unit-tested coverage for configuration parsing, protocol helpers, store behaviors, and command dispatching.
+- Unit-tested coverage for configuration parsing, protocol helpers, store behaviors, backends, and command dispatching.
 
 ## Getting Started
 
@@ -59,7 +61,10 @@ Configuration is defined in `keyz.toml`. Load precedence is:
 Sections include:
 - `[server]`: listening host and port.
 - `[protocol]`: frame size limit, idle timeout, close command, and canned responses.
-- `[store]`: compression threshold, cleanup interval, optional default TTL (applied when `SET` omits `EX`).
+- `[store]`: backend selection (`memory` or `disk`), compression threshold, cleanup interval, optional default TTL.
+- `[store.disk]`: data directory, partition count, encryption settings, cache size, flush interval.
+
+The encryption key can be provided via the `KEYZ_ENCRYPTION_KEY` environment variable (takes precedence) or `store.disk.encryption_key` in the config file.
 
 See `keyz.toml` for an annotated example.
 
@@ -89,7 +94,14 @@ cargo test
 - `src/server/init.rs`: accept loop and per-connection protocol handling.
 - `src/server/dispatcher.rs`: parses commands and routes to handlers.
 - `src/server/commands.rs`: implementations of `SET`, `GET`, `DEL`, `EXIN`, and `INFO`.
-- `src/server/store.rs`: in-memory store with TTL, compression, and background cleanup.
+- `src/server/store.rs`: storage facade with TTL, compression, and background cleanup.
+- `src/server/backend/`: pluggable storage backends.
+  - `mod.rs`: `StorageBackend` trait definition.
+  - `memory.rs`: in-memory backend using `DashMap`.
+  - `disk.rs`: disk backend with micro-partitions, LRU cache, and encryption.
+  - `format.rs`: custom `.keyz` binary file format (header, partition table, entries).
+  - `encryption.rs`: AES-256-GCM encrypt/decrypt per partition.
+  - `cache.rs`: LRU read-through cache with hit/miss counters.
 - `docs/`: supplemental documentation, including the architecture deep dive.
 
 ## Additional Documentation

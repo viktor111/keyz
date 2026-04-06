@@ -11,6 +11,23 @@ use crate::server::error::{KeyzError, Result};
 
 const DEFAULT_CONFIG_PATH: &str = "keyz.toml";
 const ENV_CONFIG_PATH: &str = "KEYZ_CONFIG";
+const ENV_ENCRYPTION_KEY: &str = "KEYZ_ENCRYPTION_KEY";
+
+pub fn parse_hex_key(hex: &str) -> Result<[u8; 32]> {
+    if hex.len() != 64 {
+        return Err(KeyzError::InvalidConfig(format!(
+            "encryption key must be 64 hex characters, got {}",
+            hex.len()
+        )));
+    }
+    let mut key = [0u8; 32];
+    for i in 0..32 {
+        key[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|_| {
+            KeyzError::InvalidConfig("encryption key contains invalid hex characters".into())
+        })?;
+    }
+    Ok(key)
+}
 
 #[derive(Debug, Clone)]
 pub enum ConfigSource {
@@ -186,6 +203,112 @@ impl Default for ServerConfig {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendType {
+    Memory,
+    Disk,
+}
+
+impl Default for BackendType {
+    fn default() -> Self {
+        BackendType::Memory
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DiskConfig {
+    #[serde(default = "DiskConfig::default_data_dir")]
+    pub data_dir: String,
+    #[serde(default = "DiskConfig::default_partition_count")]
+    pub partition_count: u32,
+    #[serde(default)]
+    pub encryption_enabled: bool,
+    pub encryption_key: Option<String>,
+    #[serde(default = "DiskConfig::default_cache_max_entries")]
+    pub cache_max_entries: usize,
+    #[serde(default = "DiskConfig::default_flush_interval_ms")]
+    pub flush_interval_ms: u64,
+}
+
+impl DiskConfig {
+    fn default_data_dir() -> String {
+        "./keyz_data".into()
+    }
+
+    const fn default_partition_count() -> u32 {
+        16
+    }
+
+    const fn default_cache_max_entries() -> usize {
+        10_000
+    }
+
+    const fn default_flush_interval_ms() -> u64 {
+        5000
+    }
+
+    pub fn resolve_encryption_key(&self) -> Result<Option<[u8; 32]>> {
+        if !self.encryption_enabled {
+            return Ok(None);
+        }
+
+        // Env var takes precedence over config file
+        let hex = if let Ok(env_key) = env::var(ENV_ENCRYPTION_KEY) {
+            env_key
+        } else if let Some(ref config_key) = self.encryption_key {
+            config_key.clone()
+        } else {
+            return Err(KeyzError::InvalidConfig(
+                "store.disk.encryption_enabled is true but no encryption key provided \
+                 (set KEYZ_ENCRYPTION_KEY env var or store.disk.encryption_key in config)"
+                    .into(),
+            ));
+        };
+
+        parse_hex_key(&hex).map(Some)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.data_dir.trim().is_empty() {
+            return Err(KeyzError::InvalidConfig(
+                "store.disk.data_dir cannot be empty".into(),
+            ));
+        }
+
+        if self.partition_count == 0 || self.partition_count > 4096 {
+            return Err(KeyzError::InvalidConfig(
+                "store.disk.partition_count must be between 1 and 4096".into(),
+            ));
+        }
+
+        if self.flush_interval_ms == 0 {
+            return Err(KeyzError::InvalidConfig(
+                "store.disk.flush_interval_ms must be greater than zero".into(),
+            ));
+        }
+
+        if let Some(ref key) = self.encryption_key {
+            parse_hex_key(key)?;
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for DiskConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: Self::default_data_dir(),
+            partition_count: Self::default_partition_count(),
+            encryption_enabled: false,
+            encryption_key: None,
+            cache_max_entries: Self::default_cache_max_entries(),
+            flush_interval_ms: Self::default_flush_interval_ms(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct StoreConfig {
     #[serde(default = "StoreConfig::default_compression_threshold")]
@@ -193,6 +316,10 @@ pub struct StoreConfig {
     #[serde(default = "StoreConfig::default_cleanup_interval_ms")]
     pub cleanup_interval_ms: u64,
     pub default_ttl_secs: Option<u64>,
+    #[serde(default)]
+    pub backend: BackendType,
+    #[serde(default)]
+    pub disk: DiskConfig,
 }
 
 impl StoreConfig {
@@ -225,6 +352,10 @@ impl StoreConfig {
             }
         }
 
+        if self.backend == BackendType::Disk {
+            self.disk.validate()?;
+        }
+
         Ok(())
     }
 }
@@ -235,6 +366,8 @@ impl Default for StoreConfig {
             compression_threshold: Self::default_compression_threshold(),
             cleanup_interval_ms: Self::default_cleanup_interval_ms(),
             default_ttl_secs: None,
+            backend: BackendType::default(),
+            disk: DiskConfig::default(),
         }
     }
 }
@@ -371,5 +504,79 @@ mod tests {
         let err =
             Config::from_toml_str("[protocol]\nmax_message_bytes = 0").expect_err("should fail");
         assert!(matches!(err, KeyzError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn defaults_to_memory_backend() {
+        let cfg = Config::from_toml_str("").expect("config should load");
+        assert_eq!(cfg.store.backend, BackendType::Memory);
+    }
+
+    #[test]
+    fn parses_disk_backend_config() {
+        let cfg = Config::from_toml_str(
+            r#"
+            [store]
+            backend = "disk"
+
+            [store.disk]
+            data_dir = "./my_data"
+            partition_count = 8
+            cache_max_entries = 5000
+            flush_interval_ms = 1000
+        "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(cfg.store.backend, BackendType::Disk);
+        assert_eq!(cfg.store.disk.data_dir, "./my_data");
+        assert_eq!(cfg.store.disk.partition_count, 8);
+        assert_eq!(cfg.store.disk.cache_max_entries, 5000);
+        assert_eq!(cfg.store.disk.flush_interval_ms, 1000);
+        assert!(!cfg.store.disk.encryption_enabled);
+    }
+
+    #[test]
+    fn rejects_zero_partition_count() {
+        let err = Config::from_toml_str(
+            r#"
+            [store]
+            backend = "disk"
+            [store.disk]
+            partition_count = 0
+        "#,
+        )
+        .expect_err("should fail");
+        assert!(matches!(err, KeyzError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn rejects_invalid_encryption_key() {
+        let err = Config::from_toml_str(
+            r#"
+            [store]
+            backend = "disk"
+            [store.disk]
+            encryption_key = "not_valid_hex"
+        "#,
+        )
+        .expect_err("should fail");
+        assert!(matches!(err, KeyzError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn disk_defaults_applied() {
+        let cfg = Config::from_toml_str(
+            r#"
+            [store]
+            backend = "disk"
+        "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(cfg.store.disk.data_dir, "./keyz_data");
+        assert_eq!(cfg.store.disk.partition_count, 16);
+        assert_eq!(cfg.store.disk.cache_max_entries, 10_000);
+        assert_eq!(cfg.store.disk.flush_interval_ms, 5000);
     }
 }

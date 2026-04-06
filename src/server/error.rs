@@ -30,4 +30,10 @@ pub enum KeyzError {
     ClientTimeout,
     #[error("Client disconnected")]
     ClientDisconnected,
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+    #[error("Corrupt data file: {0}")]
+    CorruptDataFile(String),
+    #[error("Backend error: {0}")]
+    Backend(String),
 }

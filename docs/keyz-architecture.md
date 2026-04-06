@@ -3,7 +3,8 @@
 ## Overview
 - Provides a TCP key-value server with a minimal text protocol.
 - Uses Tokio for async I/O, spawn-per-connection handling, and length-prefixed framing.
-- Persists data in an in-memory store backed by `DashMap` with optional TTL, compression, and background cleanup.
+- Pluggable storage backends: in-memory (`DashMap`) or persistent disk (custom `.keyz` file format with micro-partitions, AES-256-GCM encryption, and LRU read-through cache).
+- Optional TTL, gzip compression, and background cleanup across both backends.
 
 ## Runtime Flow
 1. `src/main.rs` loads configuration with `Config::load`, resolves the listen socket, and builds shared state (`Store`, `ProtocolConfig`).
@@ -14,7 +15,8 @@
 ## Configuration (`src/config.rs`)
 - Load order precedence: explicit path argument -> `KEYZ_CONFIG` environment variable -> `keyz.toml` in the working directory -> built-in defaults.
 - `ServerConfig`: `host`, `port`, and validation that ensures a non-zero port and non-empty host.
-- `StoreConfig`: `compression_threshold`, `cleanup_interval_ms`, `default_ttl_secs` (optional default TTL applied when `SET` omits `EX`).
+- `StoreConfig`: `backend` (`memory` or `disk`), `compression_threshold`, `cleanup_interval_ms`, `default_ttl_secs` (optional default TTL applied when `SET` omits `EX`).
+- `DiskConfig` (under `[store.disk]`): `data_dir`, `partition_count` (1–4096, default 16), `encryption_enabled`, `encryption_key` (64 hex chars), `cache_max_entries` (0 disables cache), `flush_interval_ms`. Encryption key may also be provided via the `KEYZ_ENCRYPTION_KEY` environment variable, which takes precedence over the config file value.
 - `ProtocolConfig`: frame limits (`max_message_bytes`), idle timeout, `CLOSE` command string, and stock responses for timeout/invalid input.
 - Helper methods return strongly typed values (e.g., `socket_addr`, `idle_timeout`) and perform domain validation before the server boots.
 
@@ -31,18 +33,49 @@
   | `INFO` | Emit server/store metrics. | JSON payload |
 - Invalid commands trigger `ProtocolConfig.invalid_command_response`. Idle clients receive `timeout_response` and the server drops the connection.
 
-## Store Implementation (`src/server/store.rs`)
-- Data structure: `DashMap<String, ValueEntry>` for concurrent access without explicit locks.
-- Payload handling:
-  - Compression: values at or above `compression_threshold` are passed through gzip; decompressed transparently on read.
-  - TTL: explicit `SET ... EX <seconds>` or default TTL from config. Expiry times stored as epoch seconds.
-- Background cleaner: dedicated thread (`CleanerState`) wakes every `cleanup_interval_ms` to evict expired entries and runs once more during shutdown.
+## Store Facade (`src/server/store.rs`)
+- `Store` is a facade that delegates to `Arc<dyn StorageBackend>`, selected by `store.backend` config.
+- Compression/decompression and TTL computation live in `Store`, shared across all backends.
+- Background cleaner: dedicated thread (`CleanerState`) wakes every `cleanup_interval_ms`, calls `backend.purge_expired()`, and runs once more during shutdown.
 - API surface exposed to command handlers:
-  - `insert`: applies TTL and compression decisions.
-  - `get`: lazy-expiration check on read.
-  - `delete`: removes key, skipping expired entries.
-  - `expires_in`: reports remaining TTL.
-  - `len`, `is_compressed`, and `stats` assist diagnostics/tests.
+  - `insert`: computes TTL deadline, applies compression, delegates to backend.
+  - `get`: fetches from backend, decompresses if needed.
+  - `delete`, `expires_in`: delegates directly to backend.
+  - `len`, `stats`: aggregates backend stats with store-level metrics (uptime, compression threshold).
+
+## Storage Backends (`src/server/backend/`)
+
+### StorageBackend Trait (`backend/mod.rs`)
+- Defines the interface: `insert`, `get`, `delete`, `expires_in`, `len`, `purge_expired`, `stats_extra`.
+- Backends receive pre-compressed payloads with `compressed` flag; decompression is handled by `Store`.
+- `as_any()` method enables type-specific downcasting (used for test helpers).
+
+### InMemoryBackend (`backend/memory.rs`)
+- `DashMap<String, ValueEntry>` for lock-free concurrent access.
+- Lazy expiration on read: expired entries are removed when accessed.
+- `purge_expired()` uses `DashMap::retain()` for batch cleanup.
+
+### DiskBackend (`backend/disk.rs`)
+- **Micro-partitions**: keys are hash-distributed across N partitions (default 16), each independently locked with `parking_lot::RwLock<PartitionState>`.
+- **Partition state**: each partition holds a `HashMap<String, DiskValueEntry>` loaded into memory at startup from the `.keyz` file.
+- **LRU read-through cache** (`backend/cache.rs`): optional bounded cache (configurable `cache_max_entries`, 0 to disable). On `get()`, cache is checked first; misses fall through to the partition and populate the cache. Inserts update the cache; deletes and expiry evict from it. Hit/miss counters are reported via `stats_extra()`.
+- **Encryption** (`backend/encryption.rs`): when enabled, each partition is encrypted with AES-256-GCM using a unique random 12-byte nonce per flush. The nonce is prepended to the ciphertext. Key is 32 bytes, provided via hex in config or `KEYZ_ENCRYPTION_KEY` env var.
+- **Flush strategy**: dirty partitions are flushed to disk during `purge_expired()` (driven by the cleaner thread) and on graceful shutdown via `Drop`. Flush writes to a temp file, then performs a safe 3-step swap (old → backup, temp → data, remove backup) to avoid data loss on crash.
+- **Persistence**: on startup, the existing `data.keyz` file is loaded (decrypted if needed) into partition `HashMap`s.
+
+### Custom `.keyz` File Format (`backend/format.rs`)
+```
+[ FILE HEADER (64 bytes) ]
+[ PARTITION TABLE (16 bytes × N) ]
+[ PARTITION 0 DATA ]
+[ PARTITION 1 DATA ]
+  ...
+[ PARTITION N-1 DATA ]
+```
+- **Header** (64 bytes): magic `KEZ\0`, version (1.0), partition count, encryption flag, compression algorithm, encryption salt, CRC32 checksum.
+- **Partition table entry** (16 bytes): offset (u64 LE), length (u32 LE), entry count (u32 LE).
+- **Entry format**: key length (u32 LE) + key (UTF-8) + value length (u32 LE) + value (bytes) + expires_at (u64 LE, 0 = no expiry) + flags (1 byte, bit 0 = compressed).
+- When encryption is enabled, each partition block is: `[12-byte nonce][AES-256-GCM ciphertext + auth tag]`.
 
 ## Connection Lifecycle (`src/server/init.rs`)
 - Accept loop retries with a short backoff on errors (`ACCEPT_BACKOFF`).
@@ -58,9 +91,10 @@
 - `Result<T>` type alias keeps signatures compact across modules.
 
 ## Testing Strategy
-- Unit tests cover configuration validation, socket helpers, store behaviors (compression, TTL, cleanup), dispatcher parsing, and command flow.
+- Unit tests cover configuration validation, socket helpers, store behaviors (compression, TTL, cleanup), dispatcher parsing, command flow, and all backend modules.
+- Backend-specific tests: format serialization roundtrips, encryption roundtrips and tamper detection, LRU cache eviction and counters, disk persistence across reload, encrypted persistence, partition distribution, and cache hit paths.
 - Asynchronous tests (annotated with `#[tokio::test]`) validate integration between dispatcher and store, and end-to-end message handling.
-- Run with `cargo test`; integration tests are not present, but unit coverage spans all core modules.
+- Run with `cargo test` (77 tests across all modules).
 
 ## Running the Server
 - **Local dev**: `cargo run` (or `cargo run --release`) starts the server with defaults. Provide alternate settings by editing `keyz.toml` or setting the `KEYZ_CONFIG` environment variable to another TOML file path before launch.
@@ -81,12 +115,13 @@
 - Intended to stay forward-compatible as new protocol verbs or telemetry land on the server.
 
 ## Operational Considerations
-- The server is single-process and in-memory; restart loses state.
-- Memory growth is bound only by stored values; configure `compression_threshold` and TTL defaults to mitigate.
+- **In-memory backend**: single-process and in-memory; restart loses state. Memory growth is bound only by stored values; configure `compression_threshold` and TTL defaults to mitigate.
+- **Disk backend**: data survives restarts. All partition entries are loaded into memory at startup, so memory usage scales with dataset size. Flush frequency is tied to `cleanup_interval_ms`. A crash between flushes may lose recent writes.
 - Length-prefixed protocol is binary-safe (values may contain spaces but not null bytes when interpreted as UTF-8).
 - Adjust `ProtocolConfig.max_message_bytes` to control resource usage per message.
+- Encryption key management: storing the key in the config file is convenient for development but not recommended for production. Prefer the `KEYZ_ENCRYPTION_KEY` environment variable.
 
 ## Extending Keyz
-- Add new commands by updating `dispatcher.rs` and providing corresponding functions in `commands.rs`.
-- To persist data, swap `DashMap` for a pluggable backend implementing the same API used by command handlers.
+- **New commands**: update `dispatcher.rs` and provide corresponding functions in `commands.rs`.
+- **New storage backends**: implement `StorageBackend` trait in `backend/`, add a `BackendType` variant in `config.rs`, and add a match arm in `Store::with_config()`.
 - Enhance observability by instrumenting `init.rs` and the store with metrics/logging as needed; `KeyzError` can be extended for richer context.

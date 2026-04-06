@@ -18,7 +18,7 @@ async fn run() -> Result<()> {
     let socket_addr = config.server.socket_addr()?;
     let listener = server::helpers::create_listener(socket_addr).await?;
 
-    let store = server::store::Store::with_config(config.store.clone());
+    let store = server::store::Store::with_config(config.store.clone())?;
     let protocol = Arc::new(config.protocol.clone());
 
     server::init::start(&listener, store, protocol).await;
