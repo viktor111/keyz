@@ -6,7 +6,7 @@
 - Async TCP handling driven by Tokio with per-connection tasks.
 - Length-prefixed protocol that guards against partial reads and enforces message size limits.
 - **Pluggable storage backends**: in-memory (`DashMap`) or persistent disk with a custom `.keyz` file format.
-- **Disk backend**: micro-partitioned storage with automatic key clustering, AES-256-GCM encryption at rest, and an LRU read-through cache.
+- **Disk backend**: micro-partitioned storage with automatic key clustering, AES-256-GCM encryption at rest, LRU read-through cache, and append-only file (AOF) for crash recovery.
 - Optional gzip compression and automatic cleanup of expired keys.
 - Configurable responses, timeouts, and command vocabulary through a single TOML file.
 - Unit-tested coverage for configuration parsing, protocol helpers, store behaviors, backends, and command dispatching.
@@ -63,7 +63,7 @@ Sections include:
 - `[server]`: listening host and port.
 - `[protocol]`: frame size limit, idle timeout, close command, and canned responses.
 - `[store]`: backend selection (`memory` or `disk`), compression threshold, cleanup interval, optional default TTL.
-- `[store.disk]`: data directory, partition count, encryption settings, cache size, flush interval.
+- `[store.disk]`: data directory, partition count, encryption settings, cache size, flush interval, AOF settings (`aof_enabled`, `aof_fsync`).
 
 The encryption key can be provided via the `KEYZ_ENCRYPTION_KEY` environment variable (takes precedence) or `store.disk.encryption_key` in the config file.
 
@@ -99,9 +99,10 @@ cargo test
 - `src/server/backend/`: pluggable storage backends.
   - `mod.rs`: `StorageBackend` trait definition.
   - `memory.rs`: in-memory backend using `DashMap`.
-  - `disk.rs`: disk backend with micro-partitions, LRU cache, and encryption.
+  - `disk.rs`: disk backend with micro-partitions, LRU cache, encryption, and AOF integration.
+  - `aof.rs`: append-only file for crash recovery (record format, writer, reader/replay).
   - `format.rs`: custom `.keyz` binary file format (header, partition table, entries).
-  - `encryption.rs`: AES-256-GCM encrypt/decrypt per partition.
+  - `encryption.rs`: AES-256-GCM encrypt/decrypt per partition and AOF records.
   - `cache.rs`: LRU read-through cache with hit/miss counters.
 - `docs/`: supplemental documentation, including the architecture deep dive.
 

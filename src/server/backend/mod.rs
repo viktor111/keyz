@@ -1,3 +1,4 @@
+pub mod aof;
 pub mod cache;
 pub mod disk;
 pub mod encryption;

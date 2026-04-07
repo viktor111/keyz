@@ -216,6 +216,19 @@ impl Default for BackendType {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum AofFsyncPolicy {
+    EveryWrite,
+    EverySecond,
+}
+
+impl Default for AofFsyncPolicy {
+    fn default() -> Self {
+        AofFsyncPolicy::EverySecond
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DiskConfig {
     #[serde(default = "DiskConfig::default_data_dir")]
@@ -229,6 +242,10 @@ pub struct DiskConfig {
     pub cache_max_entries: usize,
     #[serde(default = "DiskConfig::default_flush_interval_ms")]
     pub flush_interval_ms: u64,
+    #[serde(default = "DiskConfig::default_aof_enabled")]
+    pub aof_enabled: bool,
+    #[serde(default)]
+    pub aof_fsync: AofFsyncPolicy,
 }
 
 impl DiskConfig {
@@ -246,6 +263,10 @@ impl DiskConfig {
 
     const fn default_flush_interval_ms() -> u64 {
         5000
+    }
+
+    const fn default_aof_enabled() -> bool {
+        true
     }
 
     pub fn resolve_encryption_key(&self) -> Result<Option<[u8; 32]>> {
@@ -305,6 +326,8 @@ impl Default for DiskConfig {
             encryption_key: None,
             cache_max_entries: Self::default_cache_max_entries(),
             flush_interval_ms: Self::default_flush_interval_ms(),
+            aof_enabled: Self::default_aof_enabled(),
+            aof_fsync: AofFsyncPolicy::default(),
         }
     }
 }

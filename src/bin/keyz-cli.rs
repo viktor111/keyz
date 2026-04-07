@@ -61,6 +61,8 @@ cleanup_interval_ms = 250
 # encryption_key = "64-hex-char-key-here"
 # cache_max_entries = 10000
 # flush_interval_ms = 5000
+# aof_enabled = true
+# aof_fsync = "every_second"
 "#;
 
 #[derive(Parser)]

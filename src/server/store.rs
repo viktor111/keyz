@@ -51,6 +51,8 @@ impl Store {
                     encryption_key,
                     config.disk.cache_max_entries,
                     config.disk.flush_interval_ms,
+                    config.disk.aof_enabled,
+                    config.disk.aof_fsync.clone(),
                 )?;
                 Arc::new(disk)
             }
@@ -345,10 +347,9 @@ mod tests {
             disk: DiskConfig {
                 data_dir: dir.to_string_lossy().to_string(),
                 partition_count: 4,
-                encryption_enabled: false,
-                encryption_key: None,
                 cache_max_entries: 100,
-                flush_interval_ms: 60000,
+                aof_enabled: false,
+                ..DiskConfig::default()
             },
             ..StoreConfig::default()
         };
@@ -389,10 +390,9 @@ mod tests {
         let disk_config = DiskConfig {
             data_dir: dir.to_string_lossy().to_string(),
             partition_count: 4,
-            encryption_enabled: false,
-            encryption_key: None,
             cache_max_entries: 0,
-            flush_interval_ms: 60000,
+            aof_enabled: false,
+            ..DiskConfig::default()
         };
 
         // Write data

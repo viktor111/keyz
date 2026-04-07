@@ -25,3 +25,5 @@ cleanup_interval_ms = 250
 # encryption_key = "64-hex-char-key-here"  # or set KEYZ_ENCRYPTION_KEY env var
 # cache_max_entries = 10000                 # 0 to disable read-through cache
 # flush_interval_ms = 5000
+# aof_enabled = true                        # append-only file for crash recovery
+# aof_fsync = "every_second"                # "every_write" or "every_second"

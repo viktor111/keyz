@@ -34,9 +34,10 @@ Two binaries in a single crate:
 - `store.rs` — Facade over `Arc<dyn StorageBackend>`, handles compression/decompression, TTL computation, background cleaner thread
 - `backend/mod.rs` — `StorageBackend` trait definition + `BackendStats`
 - `backend/memory.rs` — `InMemoryBackend` using DashMap (default)
-- `backend/disk.rs` — `DiskBackend` with micro-partitioned .keyz file format, LRU read-through cache, AES-256-GCM encryption
+- `backend/disk.rs` — `DiskBackend` with micro-partitioned .keyz file format, LRU read-through cache, AES-256-GCM encryption, AOF integration
+- `backend/aof.rs` — Append-only file: record format (SET/DEL with CRC32), writer, reader/replay for crash recovery
 - `backend/format.rs` — .keyz binary file format: 64-byte header, partition table, length-prefixed entries
-- `backend/encryption.rs` — AES-256-GCM encrypt/decrypt per partition
+- `backend/encryption.rs` — AES-256-GCM encrypt/decrypt per partition and AOF records
 - `backend/cache.rs` — LRU cache wrapper with hit/miss counters
 - `error.rs` — Central `KeyzError` enum with semantic I/O mapping (e.g. `ConnectionReset` → `ClientDisconnected`)
 
@@ -69,6 +70,7 @@ The REPL (`keyz-cli interactive`) supports colon-commands: `:help`, `:commands`,
 - **StorageBackend trait** abstracts storage — `Store` is a facade that delegates to `Arc<dyn StorageBackend>`
 - **InMemoryBackend**: DashMap for lock-free concurrent reads/writes
 - **DiskBackend**: Custom .keyz file format with micro-partitions (hash-distributed, `RwLock` per partition), AES-256-GCM encryption per partition, LRU read-through cache. Flush on purge_expired and on Drop.
+- **AOF (Append-Only File)**: Every insert/delete appends to `data.aof` before acknowledging. On startup, snapshot is loaded then AOF replayed for crash recovery. AOF truncated after each successful flush. Lock ordering: AOF mutex → partition RwLock. Config: `aof_enabled` (default true), `aof_fsync` (`every_write` or `every_second`).
 - Compression/decompression stays in `Store` (shared across backends)
 - Background cleaner thread calls `backend.purge_expired()` periodically
 - Store is `Clone` (cheap Arc increment) and shared across all connection tasks

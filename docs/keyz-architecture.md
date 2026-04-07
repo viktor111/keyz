@@ -61,7 +61,8 @@
 - **LRU read-through cache** (`backend/cache.rs`): optional bounded cache (configurable `cache_max_entries`, 0 to disable). On `get()`, cache is checked first; misses fall through to the partition and populate the cache. Inserts update the cache; deletes and expiry evict from it. Hit/miss counters are reported via `stats_extra()`.
 - **Encryption** (`backend/encryption.rs`): when enabled, each partition is encrypted with AES-256-GCM using a unique random 12-byte nonce per flush. The nonce is prepended to the ciphertext. Key is 32 bytes, provided via hex in config or `KEYZ_ENCRYPTION_KEY` env var.
 - **Flush strategy**: dirty partitions are flushed to disk during `purge_expired()` (driven by the cleaner thread) and on graceful shutdown via `Drop`. Flush writes to a temp file, then performs a safe 3-step swap (old → backup, temp → data, remove backup) to avoid data loss on crash.
-- **Persistence**: on startup, the existing `data.keyz` file is loaded (decrypted if needed) into partition `HashMap`s.
+- **Append-Only File (AOF)** (`backend/aof.rs`): crash recovery mechanism. Every `insert` and `delete` appends a CRC32-checksummed record to `data.aof` before acknowledging. On startup, the snapshot (`data.keyz`) is loaded first, then the AOF is replayed to recover post-snapshot writes. After each successful snapshot flush, the AOF is truncated. Lock ordering is AOF mutex → partition RwLock to ensure record order matches mutation order. Config: `aof_enabled` (default true), `aof_fsync` (`every_write` for zero data loss, `every_second` for better throughput — default). When encryption is enabled, AOF records are individually encrypted. Lazy expiry deletions in `get()`/`expires_in()` are not logged to the AOF — expiry is handled canonically by `purge_expired()`.
+- **Persistence**: on startup, the existing `data.keyz` file is loaded (decrypted if needed) into partition `HashMap`s, then the AOF is replayed if present.
 
 ### Custom `.keyz` File Format (`backend/format.rs`)
 ```
@@ -76,6 +77,13 @@
 - **Partition table entry** (16 bytes): offset (u64 LE), length (u32 LE), entry count (u32 LE).
 - **Entry format**: key length (u32 LE) + key (UTF-8) + value length (u32 LE) + value (bytes) + expires_at (u64 LE, 0 = no expiry) + flags (1 byte, bit 0 = compressed).
 - When encryption is enabled, each partition block is: `[12-byte nonce][AES-256-GCM ciphertext + auth tag]`.
+
+### AOF Record Format (`backend/aof.rs`)
+Two record types, each ending with a CRC32 checksum:
+- **SET (0x01)**: `[op:1][key_len:u32 LE][key][value_len:u32 LE][value][expires_at:u64 LE][compressed:1][crc32:u32 LE]`
+- **DEL (0x02)**: `[op:1][key_len:u32 LE][key][crc32:u32 LE]`
+
+When encryption is enabled, each record is wrapped: `[encrypted_len:u32 LE][nonce:12][AES-GCM ciphertext + tag]`. Replay stops at the first truncated or corrupt record (expected on crash — partial write).
 
 ## Connection Lifecycle (`src/server/init.rs`)
 - Accept loop retries with a short backoff on errors (`ACCEPT_BACKOFF`).
@@ -117,7 +125,7 @@
 
 ## Operational Considerations
 - **In-memory backend**: single-process and in-memory; restart loses state. Memory growth is bound only by stored values; configure `compression_threshold` and TTL defaults to mitigate.
-- **Disk backend**: data survives restarts. All partition entries are loaded into memory at startup, so memory usage scales with dataset size. Flush frequency is tied to `cleanup_interval_ms`. A crash between flushes may lose recent writes.
+- **Disk backend**: data survives restarts. All partition entries are loaded into memory at startup, so memory usage scales with dataset size. With AOF enabled (default), acknowledged writes survive crashes — the AOF is replayed on startup. With `aof_fsync = "every_write"`, no acknowledged write is lost even on power failure. With `"every_second"` (default), up to 1 second of writes may be lost on crash. With AOF disabled, a crash between snapshot flushes loses recent writes.
 - Length-prefixed protocol is binary-safe (values may contain spaces but not null bytes when interpreted as UTF-8).
 - Adjust `ProtocolConfig.max_message_bytes` to control resource usage per message.
 - Encryption key management: storing the key in the config file is convenient for development but not recommended for production. Prefer the `KEYZ_ENCRYPTION_KEY` environment variable.
