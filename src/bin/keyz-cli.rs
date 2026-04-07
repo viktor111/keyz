@@ -6,12 +6,12 @@ use std::{
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::PathBuf,
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use config::{Config, ConfigContext, ConfigSource, ProtocolConfig, ServerConfig};
+use config::{BackendType, Config, ConfigContext, ConfigSource, ProtocolConfig, ServerConfig};
 use rustyline::{error::ReadlineError, DefaultEditor};
 use serde_json::json;
 
@@ -26,6 +26,12 @@ mod server {
         pub use crate::server_error_impl::*;
     }
 }
+
+#[path = "../server/backend/format.rs"]
+mod format;
+
+#[path = "../server/backend/encryption.rs"]
+mod encryption;
 
 const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 3;
 const DEFAULT_RESPONSE_TIMEOUT_SECS: u64 = 5;
@@ -43,9 +49,18 @@ timeout_response = "error:timeout"
 invalid_command_response = "error:invalid command"
 
 [store]
+# backend = "memory"
 compression_threshold = 512
 cleanup_interval_ms = 250
 # default_ttl_secs = 60
+
+# [store.disk]
+# data_dir = "./keyz_data"
+# partition_count = 16
+# encryption_enabled = false
+# encryption_key = "64-hex-char-key-here"
+# cache_max_entries = 10000
+# flush_interval_ms = 5000
 "#;
 
 #[derive(Parser)]
@@ -109,6 +124,8 @@ enum Commands {
     Interactive(InteractiveArgs),
     Batch(BatchArgs),
     Metrics(MetricsArgs),
+    /// Analyze a .keyz data file (header, partitions, key distribution)
+    Analyze(AnalyzeArgs),
 }
 
 #[derive(Args)]
@@ -189,6 +206,21 @@ struct BatchArgs {
 struct MetricsArgs {
     #[arg(long, help = "Display raw response without formatting")]
     raw: bool,
+}
+
+#[derive(Args)]
+struct AnalyzeArgs {
+    /// Path to the .keyz data file to analyze
+    #[arg(value_name = "PATH")]
+    path: PathBuf,
+
+    /// Hex-encoded 256-bit encryption key (64 hex chars) to decrypt encrypted files
+    #[arg(long = "encryption-key", value_name = "HEX")]
+    encryption_key: Option<String>,
+
+    /// List all keys in each partition
+    #[arg(long)]
+    verbose: bool,
 }
 
 #[derive(Clone)]
@@ -404,9 +436,12 @@ fn main() -> Result<()> {
         }
         Commands::Config(ConfigCommand::Init(args)) => handle_config_init(args),
         Commands::Status(args) => handle_status(&client, args, cli.json),
-        Commands::Interactive(args) => handle_interactive(client, &protocol_cfg, args, &endpoint),
+        Commands::Interactive(args) => {
+            handle_interactive(client, &protocol_cfg, args, &endpoint, &config, &source)
+        }
         Commands::Batch(args) => handle_batch(&client, args, cli.json),
         Commands::Metrics(args) => handle_metrics(&client, args, cli.json),
+        Commands::Analyze(args) => handle_analyze(args, cli.json),
     }
 }
 
@@ -502,7 +537,27 @@ fn handle_config_show(
         ConfigSource::Defaults => "built-in defaults".to_string(),
     };
 
+    let backend_str = match config.store.backend {
+        BackendType::Memory => "memory",
+        BackendType::Disk => "disk",
+    };
+
     if json {
+        let mut store_json = json!({
+            "backend": backend_str,
+            "compression_threshold": config.store.compression_threshold,
+            "cleanup_interval_ms": config.store.cleanup_interval_ms,
+            "default_ttl_secs": config.store.default_ttl_secs,
+        });
+        if config.store.backend == BackendType::Disk {
+            store_json["disk"] = json!({
+                "data_dir": config.store.disk.data_dir,
+                "partition_count": config.store.disk.partition_count,
+                "encryption_enabled": config.store.disk.encryption_enabled,
+                "cache_max_entries": config.store.disk.cache_max_entries,
+                "flush_interval_ms": config.store.disk.flush_interval_ms,
+            });
+        }
         let payload = json!({
             "source": source_desc,
             "endpoint": endpoint.to_string(),
@@ -511,11 +566,7 @@ fn handle_config_show(
                 "host": config.server.host,
                 "port": config.server.port,
             },
-            "store": {
-                "compression_threshold": config.store.compression_threshold,
-                "cleanup_interval_ms": config.store.cleanup_interval_ms,
-                "default_ttl_secs": config.store.default_ttl_secs,
-            },
+            "store": store_json,
             "protocol": {
                 "max_message_bytes": config.protocol.max_message_bytes,
                 "idle_timeout_secs": config.protocol.idle_timeout_secs,
@@ -528,52 +579,83 @@ fn handle_config_show(
         return Ok(());
     }
 
-    println!("Configuration source : {}", source_desc);
-    println!("Server endpoint      : {}", endpoint);
+    println!("  Configuration");
+    println!("  {}", "-".repeat(50));
+    println!("  Source             : {}", source_desc);
+    println!("  Server endpoint    : {}", endpoint);
     println!(
-        "Using config file    : {}",
+        "  Using config file  : {}",
         if matches!(source, ConfigSource::Defaults) {
             "no"
         } else {
             "yes"
         }
     );
-    println!("--- server");
-    println!("host = {}", config.server.host);
-    println!("port = {}", config.server.port);
-    println!("--- protocol");
+    println!();
+    println!("  Server");
+    println!("  {}", "-".repeat(50));
+    println!("  host                    = {}", config.server.host);
+    println!("  port                    = {}", config.server.port);
+    println!();
+    println!("  Protocol");
+    println!("  {}", "-".repeat(50));
     println!(
-        "max_message_bytes       = {}",
+        "  max_message_bytes       = {}",
         config.protocol.max_message_bytes
     );
     println!(
-        "idle_timeout_secs       = {}",
+        "  idle_timeout_secs       = {}",
         config.protocol.idle_timeout_secs
     );
     println!(
-        "close_command           = {}",
+        "  close_command           = {}",
         config.protocol.close_command
     );
     println!(
-        "timeout_response        = {}",
+        "  timeout_response        = {}",
         config.protocol.timeout_response
     );
     println!(
-        "invalid_command_response= {}",
+        "  invalid_command_response = {}",
         config.protocol.invalid_command_response
     );
-    println!("--- store");
+    println!();
+    println!("  Store");
+    println!("  {}", "-".repeat(50));
+    println!("  backend                 = {}", backend_str);
     println!(
-        "compression_threshold   = {}",
+        "  compression_threshold   = {}",
         config.store.compression_threshold
     );
     println!(
-        "cleanup_interval_ms     = {}",
+        "  cleanup_interval_ms     = {}",
         config.store.cleanup_interval_ms
     );
     match config.store.default_ttl_secs {
-        Some(ttl) => println!("default_ttl_secs        = {}", ttl),
-        None => println!("default_ttl_secs        = (disabled)"),
+        Some(ttl) => println!("  default_ttl_secs        = {}", ttl),
+        None => println!("  default_ttl_secs        = (disabled)"),
+    }
+    if config.store.backend == BackendType::Disk {
+        println!();
+        println!("  Disk Backend");
+        println!("  {}", "-".repeat(50));
+        println!("  data_dir                = {}", config.store.disk.data_dir);
+        println!(
+            "  partition_count         = {}",
+            config.store.disk.partition_count
+        );
+        println!(
+            "  encryption_enabled      = {}",
+            config.store.disk.encryption_enabled
+        );
+        println!(
+            "  cache_max_entries       = {}",
+            config.store.disk.cache_max_entries
+        );
+        println!(
+            "  flush_interval_ms       = {}",
+            config.store.disk.flush_interval_ms
+        );
     }
     Ok(())
 }
@@ -664,6 +746,8 @@ fn handle_interactive(
     protocol: &ProtocolConfig,
     args: InteractiveArgs,
     endpoint: &ResolvedAddress,
+    config: &Config,
+    source: &ConfigSource,
 ) -> Result<()> {
     let mut editor = DefaultEditor::new()?;
     if let Some(path) = &args.history {
@@ -672,11 +756,13 @@ fn handle_interactive(
         }
     }
 
-    println!(
-        "Connected to {} (max frame {} bytes)",
-        endpoint, protocol.max_message_bytes
-    );
-    println!("Type :help for assistance, :commands for a recap, :quit to exit.");
+    println!();
+    println!("  keyz interactive shell");
+    println!("  {}", "-".repeat(40));
+    println!("  Endpoint  : {}", endpoint);
+    println!("  Max frame : {} bytes", protocol.max_message_bytes);
+    println!("  Type :help for available commands");
+    println!();
 
     loop {
         match editor.readline("keyz> ") {
@@ -686,22 +772,67 @@ fn handle_interactive(
                     continue;
                 }
                 let _ = editor.add_history_entry(trimmed);
-                if trimmed == ":quit" || trimmed == ":exit" {
-                    break;
-                } else if trimmed == ":help" {
-                    println!("Commands: :help, :commands, :quit");
-                    println!("Any other input is sent verbatim to the server.");
-                    continue;
-                } else if trimmed == ":commands" {
-                    handle_commands(
-                        CommandsArgs {
-                            filter: None,
-                            verbose: true,
-                        },
-                        false,
-                        protocol,
-                    )?;
-                    continue;
+
+                match trimmed {
+                    ":quit" | ":exit" => break,
+                    ":help" => {
+                        repl_help();
+                        continue;
+                    }
+                    ":commands" => {
+                        handle_commands(
+                            CommandsArgs {
+                                filter: None,
+                                verbose: true,
+                            },
+                            false,
+                            protocol,
+                        )?;
+                        continue;
+                    }
+                    ":config" => {
+                        if let Err(e) = handle_config_show(config, source, false, endpoint) {
+                            println!("error: {e}");
+                        }
+                        continue;
+                    }
+                    ":config init" => {
+                        if let Err(e) = handle_config_init(ConfigInitArgs {
+                            output: PathBuf::from("keyz.toml"),
+                            force: false,
+                        }) {
+                            println!("error: {e}");
+                        }
+                        continue;
+                    }
+                    ":config init --force" => {
+                        if let Err(e) = handle_config_init(ConfigInitArgs {
+                            output: PathBuf::from("keyz.toml"),
+                            force: true,
+                        }) {
+                            println!("error: {e}");
+                        }
+                        continue;
+                    }
+                    ":metrics" | ":info" => {
+                        if let Err(e) =
+                            handle_metrics(&client, MetricsArgs { raw: false }, false)
+                        {
+                            println!("error: {e}");
+                        }
+                        continue;
+                    }
+                    ":status" => {
+                        let snapshot = probe_status(&client);
+                        output_status(&snapshot, false);
+                        continue;
+                    }
+                    ":clear" => {
+                        print!("\x1b[2J\x1b[H");
+                        let _ = io::stdout().flush();
+                        continue;
+                    }
+                    _ => {}
                 }
 
                 match client.send(trimmed) {
@@ -723,6 +854,30 @@ fn handle_interactive(
     }
     println!("bye");
     Ok(())
+}
+
+fn repl_help() {
+    println!();
+    println!("  REPL Commands");
+    println!("  {}", "-".repeat(50));
+    println!("  {:24} {}", ":help", "Show this help message");
+    println!("  {:24} {}", ":commands", "List server commands");
+    println!("  {:24} {}", ":config", "Show current configuration");
+    println!("  {:24} {}", ":config init", "Create keyz.toml template");
+    println!(
+        "  {:24} {}",
+        ":config init --force", "Overwrite existing keyz.toml"
+    );
+    println!(
+        "  {:24} {}",
+        ":metrics / :info", "Fetch server metrics (INFO)"
+    );
+    println!("  {:24} {}", ":status", "Quick server health check");
+    println!("  {:24} {}", ":clear", "Clear the screen");
+    println!("  {:24} {}", ":quit / :exit", "Exit the REPL");
+    println!();
+    println!("  Any other input is sent as a command to the server.");
+    println!();
 }
 
 fn handle_batch(client: &KeyzClient, args: BatchArgs, json: bool) -> Result<()> {
@@ -777,6 +932,391 @@ fn handle_batch(client: &KeyzClient, args: BatchArgs, json: bool) -> Result<()> 
 
         line.clear();
     }
+
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * 1024;
+    const GB: u64 = 1024 * 1024 * 1024;
+    if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn handle_analyze(args: AnalyzeArgs, json_output: bool) -> Result<()> {
+    let data = fs::read(&args.path)
+        .with_context(|| format!("failed to read {}", args.path.display()))?;
+
+    let file_size = data.len() as u64;
+
+    if data.len() < format::HEADER_SIZE {
+        return Err(anyhow!(
+            "file too small ({} bytes, minimum {} for header)",
+            data.len(),
+            format::HEADER_SIZE
+        ));
+    }
+
+    let header = format::FileHeader::deserialize(&data[..format::HEADER_SIZE])
+        .map_err(|e| anyhow!("invalid .keyz header: {e}"))?;
+
+    let compression_name = match header.compression_algo {
+        format::COMPRESSION_NONE => "none",
+        format::COMPRESSION_GZIP => "gzip",
+        _ => "unknown",
+    };
+
+    let table_start = format::HEADER_SIZE;
+    let table_size = format::PARTITION_TABLE_ENTRY_SIZE * header.partition_count as usize;
+    if data.len() < table_start + table_size {
+        return Err(anyhow!("file truncated: partition table extends past EOF"));
+    }
+
+    let mut table_entries = Vec::with_capacity(header.partition_count as usize);
+    for i in 0..header.partition_count as usize {
+        let offset = table_start + i * format::PARTITION_TABLE_ENTRY_SIZE;
+        let entry = format::PartitionTableEntry::deserialize(
+            &data[offset..offset + format::PARTITION_TABLE_ENTRY_SIZE],
+        )
+        .map_err(|e| anyhow!("corrupt partition table entry {i}: {e}"))?;
+        table_entries.push(entry);
+    }
+
+    // Determine if we can decrypt
+    let encryption_key: Option<[u8; 32]> = if header.encryption_enabled {
+        if let Some(ref hex) = args.encryption_key {
+            Some(config::parse_hex_key(hex).map_err(|e| anyhow!("{e}"))?)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let can_read_entries = !header.encryption_enabled || encryption_key.is_some();
+
+    // Analyze entries if possible
+    struct PartitionStats {
+        keys: usize,
+        compressed: usize,
+        expired: usize,
+        active: usize,
+        total_value_bytes: u64,
+        key_names: Vec<(String, usize, bool, String)>, // (key, value_size, compressed, expiry_status)
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut partition_stats: Vec<Option<PartitionStats>> =
+        Vec::with_capacity(header.partition_count as usize);
+
+    for (i, te) in table_entries.iter().enumerate() {
+        if !can_read_entries || te.length == 0 {
+            partition_stats.push(if te.length == 0 && can_read_entries {
+                Some(PartitionStats {
+                    keys: 0,
+                    compressed: 0,
+                    expired: 0,
+                    active: 0,
+                    total_value_bytes: 0,
+                    key_names: vec![],
+                })
+            } else {
+                None
+            });
+            continue;
+        }
+
+        let start = te.offset as usize;
+        let end = start + te.length as usize;
+        if end > data.len() {
+            return Err(anyhow!("partition {i} extends past end of file"));
+        }
+
+        let partition_data = &data[start..end];
+        let plaintext = if let Some(ref key) = encryption_key {
+            encryption::decrypt_partition(partition_data, key)
+                .map_err(|e| anyhow!("failed to decrypt partition {i}: {e}"))?
+        } else {
+            partition_data.to_vec()
+        };
+
+        let entries = format::deserialize_partition_entries(&plaintext)
+            .map_err(|e| anyhow!("failed to parse partition {i} entries: {e}"))?;
+
+        let mut stats = PartitionStats {
+            keys: entries.len(),
+            compressed: 0,
+            expired: 0,
+            active: 0,
+            total_value_bytes: 0,
+            key_names: Vec::with_capacity(entries.len()),
+        };
+
+        for entry in &entries {
+            stats.total_value_bytes += entry.value.len() as u64;
+            if entry.compressed {
+                stats.compressed += 1;
+            }
+            let expiry_status = if entry.expires_at == 0 {
+                "no expiry".to_string()
+            } else if now >= entry.expires_at {
+                stats.expired += 1;
+                "expired".to_string()
+            } else {
+                stats.active += 1;
+                format!("{}s remaining", entry.expires_at - now)
+            };
+            if entry.expires_at == 0 {
+                stats.active += 1;
+            }
+            stats.key_names.push((
+                entry.key.clone(),
+                entry.value.len(),
+                entry.compressed,
+                expiry_status,
+            ));
+        }
+
+        partition_stats.push(Some(stats));
+    }
+
+    // JSON output
+    if json_output {
+        let partitions_json: Vec<_> = table_entries
+            .iter()
+            .enumerate()
+            .map(|(i, te)| {
+                let mut p = json!({
+                    "index": i,
+                    "offset": te.offset,
+                    "size": te.length,
+                    "entry_count": te.entry_count,
+                });
+                if let Some(Some(ref stats)) = partition_stats.get(i) {
+                    p["active_keys"] = json!(stats.active);
+                    p["expired_keys"] = json!(stats.expired);
+                    p["compressed_keys"] = json!(stats.compressed);
+                    p["total_value_bytes"] = json!(stats.total_value_bytes);
+                    if args.verbose {
+                        p["keys"] = json!(stats.key_names.iter().map(|(k, sz, comp, exp)| {
+                            json!({"key": k, "value_size": sz, "compressed": comp, "expiry": exp})
+                        }).collect::<Vec<_>>());
+                    }
+                }
+                p
+            })
+            .collect();
+
+        let mut summary = json!({
+            "file_size": file_size,
+            "partition_count": header.partition_count,
+            "encryption_enabled": header.encryption_enabled,
+            "compression": compression_name,
+        });
+
+        if can_read_entries {
+            let total_keys: usize = partition_stats
+                .iter()
+                .filter_map(|s| s.as_ref())
+                .map(|s| s.keys)
+                .sum();
+            let total_active: usize = partition_stats
+                .iter()
+                .filter_map(|s| s.as_ref())
+                .map(|s| s.active)
+                .sum();
+            let total_expired: usize = partition_stats
+                .iter()
+                .filter_map(|s| s.as_ref())
+                .map(|s| s.expired)
+                .sum();
+            let total_compressed: usize = partition_stats
+                .iter()
+                .filter_map(|s| s.as_ref())
+                .map(|s| s.compressed)
+                .sum();
+            summary["total_keys"] = json!(total_keys);
+            summary["active_keys"] = json!(total_active);
+            summary["expired_keys"] = json!(total_expired);
+            summary["compressed_keys"] = json!(total_compressed);
+        }
+
+        let payload = json!({
+            "header": {
+                "version": format!("{}.{}", format::VERSION_MAJOR, format::VERSION_MINOR),
+                "partition_count": header.partition_count,
+                "encryption_enabled": header.encryption_enabled,
+                "compression": compression_name,
+            },
+            "partitions": partitions_json,
+            "summary": summary,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    // Text output
+    println!();
+    println!(
+        "  File: {} ({})",
+        args.path.display(),
+        format_bytes(file_size)
+    );
+    println!();
+    println!("  Header");
+    println!("  {}", "-".repeat(50));
+    println!("  Magic          : KEZ\\0 (valid)");
+    println!(
+        "  Version        : {}.{}",
+        format::VERSION_MAJOR,
+        format::VERSION_MINOR
+    );
+    println!("  Partitions     : {}", header.partition_count);
+    println!(
+        "  Encryption     : {}",
+        if header.encryption_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!("  Compression    : {}", compression_name);
+
+    println!();
+    println!("  Partitions");
+    println!("  {}", "-".repeat(50));
+    println!(
+        "  {:>4}  {:>10}  {:>10}  {:>8}",
+        "#", "Offset", "Size", "Entries"
+    );
+
+    for (i, te) in table_entries.iter().enumerate() {
+        println!(
+            "  {:>4}  {:>10}  {:>10}  {:>8}",
+            i,
+            te.offset,
+            format_bytes(te.length as u64),
+            te.entry_count
+        );
+
+        if args.verbose {
+            if let Some(Some(ref stats)) = partition_stats.get(i) {
+                for (key, val_size, compressed, expiry) in &stats.key_names {
+                    println!(
+                        "         {:30} {:>8}  {}  {}",
+                        key,
+                        format_bytes(*val_size as u64),
+                        if *compressed { "gz" } else { "  " },
+                        expiry
+                    );
+                }
+            }
+        }
+    }
+
+    if !can_read_entries {
+        println!();
+        println!("  Note: file is encrypted. Provide --encryption-key to see entry details.");
+        println!();
+        return Ok(());
+    }
+
+    // Summary
+    let total_keys: usize = partition_stats
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .map(|s| s.keys)
+        .sum();
+    let total_active: usize = partition_stats
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .map(|s| s.active)
+        .sum();
+    let total_expired: usize = partition_stats
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .map(|s| s.expired)
+        .sum();
+    let total_compressed: usize = partition_stats
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .map(|s| s.compressed)
+        .sum();
+
+    let entry_counts: Vec<usize> = partition_stats
+        .iter()
+        .filter_map(|s| s.as_ref())
+        .map(|s| s.keys)
+        .collect();
+    let n = entry_counts.len() as f64;
+    let avg = if n > 0.0 {
+        total_keys as f64 / n
+    } else {
+        0.0
+    };
+    let (min_entries, min_idx) = entry_counts
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, &v)| v)
+        .map(|(i, &v)| (v, i))
+        .unwrap_or((0, 0));
+    let (max_entries, max_idx) = entry_counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &v)| v)
+        .map(|(i, &v)| (v, i))
+        .unwrap_or((0, 0));
+    let variance = if n > 0.0 {
+        entry_counts
+            .iter()
+            .map(|&x| (x as f64 - avg).powi(2))
+            .sum::<f64>()
+            / n
+    } else {
+        0.0
+    };
+    let stddev = variance.sqrt();
+
+    let compressed_pct = if total_keys > 0 {
+        format!("{:.1}%", total_compressed as f64 / total_keys as f64 * 100.0)
+    } else {
+        "0%".to_string()
+    };
+
+    println!();
+    println!("  Summary");
+    println!("  {}", "-".repeat(50));
+    println!("  Total keys           : {}", total_keys);
+    println!("  Active keys          : {}", total_active);
+    println!("  Expired keys         : {}", total_expired);
+    println!(
+        "  Compressed entries   : {} ({})",
+        total_compressed, compressed_pct
+    );
+    println!("  File size            : {}", format_bytes(file_size));
+    println!("  Avg entries/part     : {:.1}", avg);
+    println!(
+        "  Min entries          : {} (partition {})",
+        min_entries, min_idx
+    );
+    println!(
+        "  Max entries          : {} (partition {})",
+        max_entries, max_idx
+    );
+    println!("  Std deviation        : {:.1}", stddev);
+    println!();
 
     Ok(())
 }

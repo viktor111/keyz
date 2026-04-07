@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo run:*)",
+      "Bash(taskkill //F //IM keyz.exe)",
+      "Bash(xxd D:/code/projects/keyz/keyz_test_data/data.keyz)",
+      "Bash(KEYZ_CONFIG=/tmp/keyz_test.toml cargo run --bin keyz)",
+      "Bash(KEYZ_CONFIG=/tmp/keyz_enc.toml cargo run --bin keyz)"
+    ]
+  }
+}

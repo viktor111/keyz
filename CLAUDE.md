@@ -40,7 +40,7 @@ Two binaries in a single crate:
 - `backend/cache.rs` — LRU cache wrapper with hit/miss counters
 - `error.rs` — Central `KeyzError` enum with semantic I/O mapping (e.g. `ConnectionReset` → `ClientDisconnected`)
 
-**CLI (`src/bin/keyz-cli.rs`):** Single-file Clap app with subcommands: `exec`, `interactive`, `batch`, `status`, `metrics`, `commands`, `config`.
+**CLI (`src/bin/keyz-cli.rs`):** Single-file Clap app with subcommands: `exec`, `interactive`, `batch`, `status`, `metrics`, `commands`, `config`, `analyze`. Imports `format.rs` and `encryption.rs` read-only via `#[path]` for file analysis.
 
 **Config (`src/config.rs`):** TOML-based with sections `[server]`, `[protocol]`, `[store]`, `[store.disk]`. Load precedence: explicit path → `KEYZ_CONFIG` env var → `./keyz.toml` → built-in defaults. Backend selected via `store.backend = "memory"|"disk"`.
 
@@ -48,11 +48,15 @@ Two binaries in a single crate:
 
 All frames: `[4-byte BE length][UTF-8 payload]`. Commands: `SET`, `GET`, `DEL`, `EXIN`, `INFO`, `CLOSE`. Responses are plain text except `INFO` which returns JSON.
 
-## Adding a New Command
+## Adding a New Server Command
 
 1. Add the handler function in `commands.rs`
 2. Add a match arm in `dispatcher.rs` → `dispatcher()`
 3. Add the command description to the `commands` list in `keyz-cli.rs`
+
+## Interactive REPL
+
+The REPL (`keyz-cli interactive`) supports colon-commands: `:help`, `:commands`, `:config`, `:config init`, `:metrics`/`:info`, `:status`, `:clear`, `:quit`/`:exit`. Everything else is sent as a server command. New REPL commands are added as match arms in `handle_interactive()`.
 
 ## Adding a New Storage Backend
 

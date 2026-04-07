@@ -38,11 +38,12 @@ cargo run --bin keyz-cli -- exec GET foo
 Highlights:
 - `exec`: send a single command (`keyz-cli exec SET foo bar EX 10` or `--raw "GET foo"`).
 - `commands`: list supported verbs and optional notes (`--verbose`).
-- `config show`: inspect the effective configuration and whether it came from disk; `config init` scaffolds a `keyz.toml`.
+- `config show`: inspect the effective configuration (including disk backend settings) and whether it came from disk; `config init` scaffolds a `keyz.toml`.
 - `status`: probe server health once or continuously with `--watch`.
-- `interactive`: launch a readline-powered REPL with shortcuts like `:help` and `:commands`.
+- `interactive`: launch a readline-powered REPL with `:help`, `:commands`, `:config`, `:metrics`, `:status`, `:clear`, and `:quit`.
 - `batch`: stream commands from stdin or a file, with `--stop-on-error` and `--json` for scripting.
 - `metrics`: fetch diagnostics via the `INFO` command and pretty-print JSON, falling back gracefully when unsupported.
+- `analyze`: inspect `.keyz` data files offline — shows header, partition table, key distribution, and summary statistics. Supports `--encryption-key` for encrypted files, `--verbose` to list all keys, and `--json` for machine-readable output.
 
 ### Docker
 ```bash

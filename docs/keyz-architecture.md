@@ -103,16 +103,17 @@
 
 ## CLI Tooling
 - `keyz-cli` is compiled alongside the server (`cargo run --bin keyz-cli -- --help`).
+- Imports `format.rs` and `encryption.rs` read-only via `#[path]` for offline file analysis.
 - Global flags mirror configuration selection (`--config`, `--host`, `--port`, `--json`).
 - Subcommands:
   - `exec`: send ad-hoc commands, with `--raw` for literal frames.
   - `commands`: list protocol verbs and usage notes.
-  - `config show|init`: inspect effective configuration or scaffold a template.
+  - `config show|init`: inspect effective configuration (including disk backend settings) or scaffold a template.
   - `status`: run one-off or continuous health checks (`--watch`), reporting latency.
-  - `interactive`: provides a readline shell with `:help`, `:commands`, and history persistence.
+  - `interactive`: readline REPL with colon-commands: `:help`, `:commands`, `:config`, `:config init`, `:metrics`/`:info`, `:status`, `:clear`, `:quit`/`:exit`. History persistence via `--history`.
   - `batch`: replay commands from files/stdin with optional `--stop-on-error`.
   - `metrics`: probes the `INFO` command and pretty-prints JSON payloads when available.
-- Intended to stay forward-compatible as new protocol verbs or telemetry land on the server.
+  - `analyze`: offline inspection of `.keyz` data files. Reads the file header, partition table, and (if unencrypted or `--encryption-key` provided) deserializes all entries to produce per-partition and aggregate statistics: key counts, active/expired breakdown, compression ratio, partition balance (min/max/stddev). Supports `--verbose` to list all keys and `--json` for machine-readable output.
 
 ## Operational Considerations
 - **In-memory backend**: single-process and in-memory; restart loses state. Memory growth is bound only by stored values; configure `compression_threshold` and TTL defaults to mitigate.
