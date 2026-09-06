@@ -84,6 +84,14 @@ impl FileHeader {
         }
 
         let partition_count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        if partition_count == 0
+            || data[12] > 1
+            || !matches!(data[13], COMPRESSION_NONE | COMPRESSION_GZIP)
+        {
+            return Err(KeyzError::CorruptDataFile(
+                "invalid file header metadata".into(),
+            ));
+        }
         let encryption_enabled = data[12] != 0;
         let compression_algo = data[13];
 
@@ -130,13 +138,13 @@ impl PartitionTableEntry {
 }
 
 impl Entry {
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> Result<Vec<u8>> {
         let key_bytes = self.key.as_bytes();
-        let key_len = key_bytes.len() as u32;
-        let value_len = self.value.len() as u32;
+        let key_len = checked_u32_length(key_bytes.len() as u64, "entry key")?;
+        let value_len = checked_u32_length(self.value.len() as u64, "entry value")?;
         let flags: u8 = if self.compressed { 1 } else { 0 };
 
-        let total = 4 + key_bytes.len() + 4 + self.value.len() + 8 + 1;
+        let total = serialized_entry_length(key_bytes.len(), self.value.len())?;
         let mut buf = Vec::with_capacity(total);
 
         buf.extend_from_slice(&key_len.to_le_bytes());
@@ -146,7 +154,7 @@ impl Entry {
         buf.extend_from_slice(&self.expires_at.to_le_bytes());
         buf.push(flags);
 
-        buf
+        Ok(buf)
     }
 
     pub fn deserialize(cursor: &mut Cursor<&[u8]>) -> Result<Self> {
@@ -159,6 +167,17 @@ impl Entry {
             .map_err(|_| KeyzError::CorruptDataFile("unexpected end of entry (key_len)".into()))?;
         let key_len = u32::from_le_bytes(u32_buf) as usize;
 
+        if key_len
+            > cursor
+                .get_ref()
+                .len()
+                .saturating_sub(cursor.position() as usize)
+        {
+            return Err(KeyzError::CorruptDataFile(
+                "entry key length exceeds remaining data".into(),
+            ));
+        }
+
         let mut key_bytes = vec![0u8; key_len];
         cursor
             .read_exact(&mut key_bytes)
@@ -166,21 +185,30 @@ impl Entry {
         let key = String::from_utf8(key_bytes)
             .map_err(|_| KeyzError::CorruptDataFile("invalid UTF-8 in key".into()))?;
 
-        cursor
-            .read_exact(&mut u32_buf)
-            .map_err(|_| KeyzError::CorruptDataFile("unexpected end of entry (value_len)".into()))?;
+        cursor.read_exact(&mut u32_buf).map_err(|_| {
+            KeyzError::CorruptDataFile("unexpected end of entry (value_len)".into())
+        })?;
         let value_len = u32::from_le_bytes(u32_buf) as usize;
+
+        if value_len
+            > cursor
+                .get_ref()
+                .len()
+                .saturating_sub(cursor.position() as usize)
+        {
+            return Err(KeyzError::CorruptDataFile(
+                "entry value length exceeds remaining data".into(),
+            ));
+        }
 
         let mut value = vec![0u8; value_len];
         cursor
             .read_exact(&mut value)
             .map_err(|_| KeyzError::CorruptDataFile("unexpected end of entry (value)".into()))?;
 
-        cursor
-            .read_exact(&mut u64_buf)
-            .map_err(|_| {
-                KeyzError::CorruptDataFile("unexpected end of entry (expires_at)".into())
-            })?;
+        cursor.read_exact(&mut u64_buf).map_err(|_| {
+            KeyzError::CorruptDataFile("unexpected end of entry (expires_at)".into())
+        })?;
         let expires_at = u64::from_le_bytes(u64_buf);
 
         cursor
@@ -197,12 +225,128 @@ impl Entry {
     }
 }
 
-pub fn serialize_partition_entries(entries: &[Entry]) -> Vec<u8> {
-    let mut buf = Vec::new();
+pub(crate) fn checked_u32_length(length: u64, field: &str) -> Result<u32> {
+    u32::try_from(length)
+        .map_err(|_| KeyzError::Backend(format!("{field} exceeds the version 1 file format limit")))
+}
+
+pub(crate) fn serialized_entry_length(key_len: usize, value_len: usize) -> Result<usize> {
+    checked_u32_length(key_len as u64, "entry key")?;
+    checked_u32_length(value_len as u64, "entry value")?;
+    key_len
+        .checked_add(value_len)
+        .and_then(|n| n.checked_add(17))
+        .ok_or_else(|| KeyzError::Backend("serialized entry size overflow".into()))
+}
+
+pub fn serialize_partition_entries(entries: &[Entry]) -> Result<Vec<u8>> {
+    checked_u32_length(entries.len() as u64, "partition entry count")?;
+    let size = entries.iter().try_fold(0usize, |size, entry| {
+        size.checked_add(serialized_entry_length(entry.key.len(), entry.value.len())?)
+            .ok_or_else(|| KeyzError::Backend("serialized partition size overflow".into()))
+    })?;
+    checked_u32_length(size as u64, "partition length")?;
+    let mut buf = Vec::with_capacity(size);
     for entry in entries {
-        buf.extend(entry.serialize());
+        buf.extend(entry.serialize()?);
     }
-    buf
+    Ok(buf)
+}
+
+/// Validate every table row before any caller reads or rewrites partition data.
+/// Version 1 snapshots contain one contiguous table followed by partition data;
+/// unreferenced bytes are corruption, not an implicitly empty partition.
+pub fn validate_partition_table(
+    data: &[u8],
+    header: &FileHeader,
+) -> Result<Vec<PartitionTableEntry>> {
+    let count = usize::try_from(header.partition_count)
+        .map_err(|_| KeyzError::CorruptDataFile("partition count is not addressable".into()))?;
+    if count == 0 {
+        return Err(KeyzError::CorruptDataFile(
+            "zero partitions in snapshot".into(),
+        ));
+    }
+    let table_end = count
+        .checked_mul(PARTITION_TABLE_ENTRY_SIZE)
+        .and_then(|size| HEADER_SIZE.checked_add(size))
+        .filter(|end| *end <= data.len())
+        .ok_or_else(|| KeyzError::CorruptDataFile("invalid partition table size".into()))?;
+    let mut rows = Vec::with_capacity(count);
+    let mut ranges = Vec::new();
+    for (index, bytes) in data[HEADER_SIZE..table_end]
+        .chunks_exact(PARTITION_TABLE_ENTRY_SIZE)
+        .enumerate()
+    {
+        let row = PartitionTableEntry::deserialize(bytes)?;
+        if (row.length == 0) != (row.entry_count == 0) {
+            return Err(KeyzError::CorruptDataFile(format!(
+                "partition {index} length/count mismatch"
+            )));
+        }
+        if row.length == 0 {
+            if row.offset != 0 {
+                return Err(KeyzError::CorruptDataFile(format!(
+                    "empty partition {index} has a data offset"
+                )));
+            }
+        } else {
+            let end = row
+                .offset
+                .checked_add(u64::from(row.length))
+                .ok_or_else(|| {
+                    KeyzError::CorruptDataFile(format!("partition {index} range overflow"))
+                })?;
+            let start = usize::try_from(row.offset).map_err(|_| {
+                KeyzError::CorruptDataFile(format!("partition {index} offset is not addressable"))
+            })?;
+            let end = usize::try_from(end).map_err(|_| {
+                KeyzError::CorruptDataFile(format!("partition {index} end is not addressable"))
+            })?;
+            if start < table_end || end > data.len() {
+                return Err(KeyzError::CorruptDataFile(format!(
+                    "partition {index} range lies outside the data region"
+                )));
+            }
+            ranges.push((start, end));
+        }
+        rows.push(row);
+    }
+    ranges.sort_unstable();
+    let mut end = table_end;
+    for (start, next_end) in ranges {
+        if start != end {
+            return Err(KeyzError::CorruptDataFile(
+                "partition data overlaps or contains unreferenced bytes".into(),
+            ));
+        }
+        end = next_end;
+    }
+    if end != data.len() {
+        return Err(KeyzError::CorruptDataFile(
+            "unreferenced trailing snapshot data".into(),
+        ));
+    }
+    Ok(rows)
+}
+
+pub fn deserialize_partition_entries_counted(
+    data: &[u8],
+    expected_count: u32,
+) -> Result<Vec<Entry>> {
+    // Even an empty key and value need 17 bytes. Check before allocating/decoding.
+    if u64::from(expected_count) > data.len() as u64 / 17 {
+        return Err(KeyzError::CorruptDataFile(
+            "partition entry count exceeds available data".into(),
+        ));
+    }
+    let entries = deserialize_partition_entries(data)?;
+    if entries.len() as u64 != u64::from(expected_count) {
+        return Err(KeyzError::CorruptDataFile(
+            "partition decoded entry count mismatch".into(),
+        ));
+    }
+    Ok(entries)
 }
 
 pub fn deserialize_partition_entries(data: &[u8]) -> Result<Vec<Entry>> {
@@ -220,6 +364,129 @@ pub fn deserialize_partition_entries(data: &[u8]) -> Result<Vec<Entry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn format_limits_are_checked_without_large_allocations() {
+        assert_eq!(
+            checked_u32_length(u64::from(u32::MAX), "partition").unwrap(),
+            u32::MAX
+        );
+        assert!(checked_u32_length(u64::from(u32::MAX) + 1, "partition").is_err());
+        assert!(checked_u32_length(u64::MAX, "partition").is_err());
+        assert!(serialized_entry_length(usize::MAX, 1).is_err());
+    }
+
+    fn snapshot(rows: &[PartitionTableEntry], bytes: &[u8]) -> (FileHeader, Vec<u8>) {
+        let header = FileHeader {
+            partition_count: rows.len() as u32,
+            encryption_enabled: false,
+            compression_algo: COMPRESSION_GZIP,
+            encryption_salt: [0; 12],
+        };
+        let mut data = header.serialize();
+        for row in rows {
+            data.extend(row.serialize());
+        }
+        data.extend_from_slice(bytes);
+        (header, data)
+    }
+
+    #[test]
+    fn table_rejects_invalid_counts_ranges_overlap_and_unreferenced_bytes() {
+        for row in [
+            PartitionTableEntry {
+                offset: 0,
+                length: 0,
+                entry_count: 1,
+            },
+            PartitionTableEntry {
+                offset: 80,
+                length: 1,
+                entry_count: 0,
+            },
+            PartitionTableEntry {
+                offset: u64::MAX,
+                length: 1,
+                entry_count: 1,
+            },
+            PartitionTableEntry {
+                offset: 79,
+                length: 1,
+                entry_count: 1,
+            },
+            PartitionTableEntry {
+                offset: 81,
+                length: 1,
+                entry_count: 1,
+            },
+            PartitionTableEntry {
+                offset: 80,
+                length: 2,
+                entry_count: 1,
+            },
+            PartitionTableEntry {
+                offset: 0,
+                length: 0,
+                entry_count: 0,
+            },
+        ] {
+            let (header, data) = snapshot(&[row], &[0]);
+            assert!(validate_partition_table(&data, &header).is_err());
+        }
+        let row = PartitionTableEntry {
+            offset: 96,
+            length: 1,
+            entry_count: 1,
+        };
+        let (header, data) = snapshot(&[row.clone(), row], &[0]);
+        assert!(validate_partition_table(&data, &header).is_err());
+        let (header, data) = snapshot(
+            &[PartitionTableEntry {
+                offset: 0,
+                length: 0,
+                entry_count: 0,
+            }],
+            &[],
+        );
+        assert!(validate_partition_table(&data, &header).is_ok());
+        let row = PartitionTableEntry {
+            offset: 80,
+            length: 1,
+            entry_count: 1,
+        };
+        let (header, data) = snapshot(&[row], &[0]);
+        assert!(validate_partition_table(&data, &header).is_ok());
+        assert!(validate_partition_table(&data[..79], &header).is_err());
+    }
+
+    #[test]
+    fn decoded_count_must_match_actual_partition_entries() {
+        let bytes = Entry {
+            key: "key".into(),
+            value: b"value".to_vec(),
+            expires_at: 0,
+            compressed: false,
+        }
+        .serialize()
+        .unwrap();
+        assert_eq!(
+            deserialize_partition_entries_counted(&bytes, 1)
+                .unwrap()
+                .len(),
+            1
+        );
+        for count in [0, 2, u32::MAX] {
+            assert!(deserialize_partition_entries_counted(&bytes, count).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_large_lengths_before_allocating() {
+        let key = u32::MAX.to_le_bytes();
+        assert!(Entry::deserialize(&mut Cursor::new(key.as_slice())).is_err());
+        let value = [0, 0, 0, 0, 255, 255, 255, 255];
+        assert!(Entry::deserialize(&mut Cursor::new(value.as_slice())).is_err());
+    }
 
     #[test]
     fn header_roundtrip() {
@@ -289,7 +556,7 @@ mod tests {
             compressed: true,
         };
 
-        let serialized = entry.serialize();
+        let serialized = entry.serialize().unwrap();
         let mut cursor = Cursor::new(serialized.as_slice());
         let deserialized = Entry::deserialize(&mut cursor).unwrap();
 
@@ -308,7 +575,7 @@ mod tests {
             compressed: false,
         };
 
-        let serialized = entry.serialize();
+        let serialized = entry.serialize().unwrap();
         let mut cursor = Cursor::new(serialized.as_slice());
         let deserialized = Entry::deserialize(&mut cursor).unwrap();
 
@@ -339,7 +606,7 @@ mod tests {
             },
         ];
 
-        let serialized = serialize_partition_entries(&entries);
+        let serialized = serialize_partition_entries(&entries).unwrap();
         let deserialized = deserialize_partition_entries(&serialized).unwrap();
 
         assert_eq!(deserialized.len(), 3);
@@ -353,7 +620,7 @@ mod tests {
     #[test]
     fn empty_partition_roundtrip() {
         let entries: Vec<Entry> = vec![];
-        let serialized = serialize_partition_entries(&entries);
+        let serialized = serialize_partition_entries(&entries).unwrap();
         assert!(serialized.is_empty());
         let deserialized = deserialize_partition_entries(&serialized).unwrap();
         assert!(deserialized.is_empty());

@@ -10,13 +10,40 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
-    runs-on: ubuntu-latest
-
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v3
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - uses: actions/checkout@v4
+    - name: Install Rust
+      run: rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+    - name: Check formatting
+      run: cargo +stable fmt --all -- --check
+    - name: Lint
+      run: cargo +stable clippy --all-targets --locked -- -D warnings
+    - name: Unit, protocol, TLS, and process recovery tests
+      run: cargo +stable test --all-targets --locked
+    - name: Build release binaries
+      run: cargo +stable build --release --bins --locked
+
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t keyz:test .
+      - name: Container readiness and graceful stop
+        run: |
+          docker run -d --name keyz-test keyz:test
+          trap 'docker logs keyz-test; docker rm -f keyz-test' EXIT
+          for attempt in $(seq 1 30); do
+            if docker exec keyz-test keyz-cli status; then break; fi
+            sleep 1
+          done
+          docker exec keyz-test keyz-cli status
+          docker stop --time 30 keyz-test
+          test "$(docker inspect --format '{{.State.ExitCode}}' keyz-test)" = "0"

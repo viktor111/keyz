@@ -36,4 +36,18 @@ pub enum KeyzError {
     CorruptDataFile(String),
     #[error("Backend error: {0}")]
     Backend(String),
+    #[error("Storage work queue is full")]
+    Overloaded,
+    #[error("Server is shutting down")]
+    ShuttingDown,
+    #[error("Storage capacity exceeded (used {used_bytes}, requested {requested_bytes}, limit {max_bytes} bytes)")]
+    CapacityExceeded {
+        used_bytes: u64,
+        requested_bytes: u64,
+        max_bytes: u64,
+    },
+    #[error("TLS error: {0}")]
+    Tls(String),
+    #[error("Authentication failed")]
+    Unauthorized,
 }

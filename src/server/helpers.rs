@@ -1,8 +1,7 @@
 use std::net::SocketAddr;
 
 use tokio::{
-    io::AsyncReadExt,
-    io::AsyncWriteExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::{TcpListener, TcpStream},
 };
 
@@ -16,7 +15,10 @@ pub async fn listener_accept_conn(listener: &TcpListener) -> Result<(TcpStream, 
     listener.accept().await.map_err(KeyzError::from)
 }
 
-pub async fn read_message(stream: &mut TcpStream, max_len: u32) -> Result<String> {
+pub async fn read_message<S: AsyncRead + Unpin + ?Sized>(
+    stream: &mut S,
+    max_len: u32,
+) -> Result<String> {
     let mut len_bytes = [0; 4];
     stream
         .read_exact(&mut len_bytes)
@@ -37,8 +39,12 @@ pub async fn read_message(stream: &mut TcpStream, max_len: u32) -> Result<String
     Ok(message)
 }
 
-pub async fn write_message(stream: &mut TcpStream, message: &str) -> Result<()> {
-    let len = message.len() as u32;
+pub async fn write_message<S: AsyncWrite + Unpin + ?Sized>(
+    stream: &mut S,
+    message: &str,
+) -> Result<()> {
+    let len = u32::try_from(message.len())
+        .map_err(|_| KeyzError::InvalidCommand("response exceeds frame size".into()))?;
     let len_bytes = len.to_be_bytes();
 
     stream.write_all(&len_bytes).await.map_err(map_io_error)?;
@@ -46,6 +52,7 @@ pub async fn write_message(stream: &mut TcpStream, message: &str) -> Result<()> 
         .write_all(message.as_bytes())
         .await
         .map_err(map_io_error)?;
+    stream.flush().await.map_err(map_io_error)?;
     Ok(())
 }
 

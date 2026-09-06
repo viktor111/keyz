@@ -1,0 +1,8 @@
+target
+fuzz
+.git
+.codex
+.claude
+keyz_data
+*.pem
+*.key

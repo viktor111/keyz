@@ -2,6 +2,7 @@
 name = "keyz"
 version = "1.0.4"
 edition = "2021"
+rust-version = "1.89"
 description = "keyz client for Rust"
 license = "MIT"
 repository = "https://github.com/viktor111/keyz"
@@ -25,3 +26,10 @@ lru = "0.12"
 rand = "0.8"
 parking_lot = "0.12"
 crc32fast = "1.4"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+subtle = "2.6"
+
+[dev-dependencies]
+rcgen = "0.14"

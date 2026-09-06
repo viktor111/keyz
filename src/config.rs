@@ -14,7 +14,7 @@ const ENV_CONFIG_PATH: &str = "KEYZ_CONFIG";
 const ENV_ENCRYPTION_KEY: &str = "KEYZ_ENCRYPTION_KEY";
 
 pub fn parse_hex_key(hex: &str) -> Result<[u8; 32]> {
-    if hex.len() != 64 {
+    if hex.len() != 64 || !hex.is_ascii() {
         return Err(KeyzError::InvalidConfig(format!(
             "encryption key must be 64 hex characters, got {}",
             hex.len()
@@ -43,7 +43,7 @@ pub struct ConfigContext {
     pub source: ConfigSource,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Config {
     #[serde(default)]
     pub server: ServerConfig,
@@ -51,16 +51,10 @@ pub struct Config {
     pub store: StoreConfig,
     #[serde(default)]
     pub protocol: ProtocolConfig,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            server: ServerConfig::default(),
-            store: StoreConfig::default(),
-            protocol: ProtocolConfig::default(),
-        }
-    }
+    #[serde(default)]
+    pub replication: ReplicationConfig,
+    #[serde(default)]
+    pub security: SecurityConfig,
 }
 
 impl Config {
@@ -145,6 +139,30 @@ impl Config {
         self.server.validate()?;
         self.store.validate()?;
         self.protocol.validate()?;
+        self.replication.validate()?;
+        if self.replication.role == ReplicationRole::Leader
+            && u64::from(self.protocol.max_message_bytes)
+                + crate::server::replication::REPLICATION_SET_OVERHEAD as u64
+                > crate::server::replication::MAX_REPLICATION_FRAME as u64
+        {
+            return Err(KeyzError::InvalidConfig(
+                "leader protocol.max_message_bytes must leave 22 bytes within the 64 MiB replication record limit".into(),
+            ));
+        }
+        self.security.validate()?;
+        if self.security.tls.enabled
+            && self.replication.role == ReplicationRole::Follower
+            && self
+                .security
+                .tls
+                .ca_path
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return Err(KeyzError::InvalidConfig(
+                "TLS followers require security.tls.ca_path".into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -155,9 +173,23 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "ServerConfig::default_port")]
     pub port: u16,
+    #[serde(default = "ServerConfig::default_capacity")]
+    pub max_connections: usize,
+    #[serde(default = "ServerConfig::default_capacity")]
+    pub work_queue_capacity: usize,
+    #[serde(default = "ServerConfig::default_timeout")]
+    pub write_timeout_secs: u64,
+    #[serde(default = "ServerConfig::default_timeout")]
+    pub shutdown_timeout_secs: u64,
 }
 
 impl ServerConfig {
+    const fn default_capacity() -> usize {
+        1024
+    }
+    const fn default_timeout() -> u64 {
+        30
+    }
     fn default_host() -> String {
         "127.0.0.1".into()
     }
@@ -172,14 +204,35 @@ impl ServerConfig {
         } else {
             self.host.trim()
         };
-        let addr = format!("{host}:{}", self.port);
-        addr.to_socket_addrs()
+        (host.trim_matches(['[', ']']), self.port)
+            .to_socket_addrs()
             .map_err(|_| KeyzError::InvalidSocketAddress)?
             .next()
             .ok_or(KeyzError::InvalidSocketAddress)
     }
 
     fn validate(&mut self) -> Result<()> {
+        if self.max_connections == 0
+            || self.work_queue_capacity == 0
+            || self.max_connections > tokio::sync::Semaphore::MAX_PERMITS
+            || self.work_queue_capacity > tokio::sync::Semaphore::MAX_PERMITS
+            || self.write_timeout_secs == 0
+            || self.shutdown_timeout_secs == 0
+        {
+            return Err(KeyzError::InvalidConfig(
+                "server connection/queue limits must fit a semaphore and all limits/timeouts must be positive".into(),
+            ));
+        }
+        for timeout in [self.write_timeout_secs, self.shutdown_timeout_secs] {
+            if std::time::Instant::now()
+                .checked_add(Duration::from_secs(timeout))
+                .is_none()
+            {
+                return Err(KeyzError::InvalidConfig(
+                    "server timeout is too large".into(),
+                ));
+            }
+        }
         if self.port == 0 {
             return Err(KeyzError::InvalidConfig(
                 "server.port must be greater than zero".into(),
@@ -199,34 +252,28 @@ impl Default for ServerConfig {
         Self {
             host: "127.0.0.1".into(),
             port: 7667,
+            max_connections: Self::default_capacity(),
+            work_queue_capacity: Self::default_capacity(),
+            write_timeout_secs: Self::default_timeout(),
+            shutdown_timeout_secs: Self::default_timeout(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendType {
+    #[default]
     Memory,
     Disk,
 }
 
-impl Default for BackendType {
-    fn default() -> Self {
-        BackendType::Memory
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AofFsyncPolicy {
     EveryWrite,
+    #[default]
     EverySecond,
-}
-
-impl Default for AofFsyncPolicy {
-    fn default() -> Self {
-        AofFsyncPolicy::EverySecond
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -308,6 +355,14 @@ impl DiskConfig {
                 "store.disk.flush_interval_ms must be greater than zero".into(),
             ));
         }
+        if std::time::Instant::now()
+            .checked_add(Duration::from_millis(self.flush_interval_ms))
+            .is_none()
+        {
+            return Err(KeyzError::InvalidConfig(
+                "store.disk.flush_interval_ms is too large".into(),
+            ));
+        }
 
         if let Some(ref key) = self.encryption_key {
             parse_hex_key(key)?;
@@ -334,6 +389,9 @@ impl Default for DiskConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct StoreConfig {
+    /// Key UTF-8 bytes plus stored payload bytes; zero means unlimited.
+    #[serde(default)]
+    pub max_bytes: u64,
     #[serde(default = "StoreConfig::default_compression_threshold")]
     pub compression_threshold: usize,
     #[serde(default = "StoreConfig::default_cleanup_interval_ms")]
@@ -354,7 +412,7 @@ impl StoreConfig {
         250
     }
 
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.compression_threshold == 0 {
             return Err(KeyzError::InvalidConfig(
                 "store.compression_threshold must be greater than zero".into(),
@@ -364,6 +422,14 @@ impl StoreConfig {
         if self.cleanup_interval_ms == 0 {
             return Err(KeyzError::InvalidConfig(
                 "store.cleanup_interval_ms must be greater than zero".into(),
+            ));
+        }
+        if std::time::Instant::now()
+            .checked_add(Duration::from_millis(self.cleanup_interval_ms))
+            .is_none()
+        {
+            return Err(KeyzError::InvalidConfig(
+                "store.cleanup_interval_ms is too large".into(),
             ));
         }
 
@@ -386,6 +452,7 @@ impl StoreConfig {
 impl Default for StoreConfig {
     fn default() -> Self {
         Self {
+            max_bytes: 0,
             compression_threshold: Self::default_compression_threshold(),
             cleanup_interval_ms: Self::default_cleanup_interval_ms(),
             default_ttl_secs: None,
@@ -407,6 +474,87 @@ pub struct ProtocolConfig {
     pub timeout_response: String,
     #[serde(default = "ProtocolConfig::default_invalid_command_response")]
     pub invalid_command_response: String,
+}
+
+/// Authentication applies to all client commands, including diagnostics.
+/// Environment variables override file values. Replication defaults to the
+/// client token unless a distinct replication token is supplied.
+#[derive(Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecurityConfig {
+    pub auth_token: Option<String>,
+    pub replication_token: Option<String>,
+    /// Explicit IP:port destinations the CLI may probe from cluster discovery.
+    pub trusted_cluster_addresses: Vec<std::net::SocketAddr>,
+    pub tls: TlsConfig,
+}
+
+impl std::fmt::Debug for SecurityConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SecurityConfig")
+            .field(
+                "auth_token",
+                &self.auth_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field(
+                "replication_token",
+                &self.replication_token.as_ref().map(|_| "[redacted]"),
+            )
+            .field("trusted_cluster_addresses", &self.trusted_cluster_addresses)
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
+impl SecurityConfig {
+    pub fn resolve_auth_token(&self) -> Option<String> {
+        env::var("KEYZ_AUTH_TOKEN")
+            .ok()
+            .or_else(|| self.auth_token.clone())
+    }
+
+    pub fn resolve_replication_token(&self) -> Option<String> {
+        env::var("KEYZ_REPLICATION_TOKEN")
+            .ok()
+            .or_else(|| self.replication_token.clone())
+            .or_else(|| self.resolve_auth_token())
+    }
+
+    fn validate(&self) -> Result<()> {
+        for (name, token) in [
+            ("client", self.resolve_auth_token()),
+            ("replication", self.resolve_replication_token()),
+        ] {
+            if token
+                .as_ref()
+                .is_some_and(|value| value.is_empty() || value.len() > 4096)
+            {
+                return Err(KeyzError::InvalidConfig(format!(
+                    "{name} authentication token must contain 1 to 4096 bytes"
+                )));
+            }
+        }
+        if self.tls.enabled && (self.tls.cert_path.is_some() != self.tls.key_path.is_some()) {
+            return Err(KeyzError::InvalidConfig(
+                "TLS certificate and private key must be provided together".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TlsConfig {
+    pub enabled: bool,
+    /// PEM certificate chain, required by the server when TLS is enabled.
+    pub cert_path: Option<String>,
+    /// PEM private key (PKCS#8, PKCS#1, or SEC1).
+    pub key_path: Option<String>,
+    /// PEM CA certificates for outgoing client and replication connections.
+    pub ca_path: Option<String>,
+    /// Name verified against the peer certificate. Defaults to address host.
+    pub server_name: Option<String>,
 }
 
 impl ProtocolConfig {
@@ -440,6 +588,14 @@ impl ProtocolConfig {
         if self.idle_timeout_secs == 0 {
             return Err(KeyzError::InvalidConfig(
                 "protocol.idle_timeout_secs must be greater than zero".into(),
+            ));
+        }
+        if std::time::Instant::now()
+            .checked_add(Duration::from_secs(self.idle_timeout_secs))
+            .is_none()
+        {
+            return Err(KeyzError::InvalidConfig(
+                "protocol.idle_timeout_secs is too large".into(),
             ));
         }
 
@@ -481,9 +637,138 @@ impl Default for ProtocolConfig {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum ReplicationRole {
+    #[default]
+    Disabled,
+    Leader,
+    Follower,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReplicationConfig {
+    #[serde(default)]
+    pub role: ReplicationRole,
+    #[serde(default = "ReplicationConfig::default_bind")]
+    pub bind: String,
+    pub leader_address: Option<String>,
+}
+
+impl ReplicationConfig {
+    fn default_bind() -> String {
+        "0.0.0.0:7668".into()
+    }
+
+    pub fn bind_addr(&self) -> Result<std::net::SocketAddr> {
+        self.bind.parse().map_err(|_| {
+            KeyzError::InvalidConfig(format!("invalid replication bind address: {}", self.bind))
+        })
+    }
+
+    pub fn leader_addr(&self) -> Result<std::net::SocketAddr> {
+        let addr = self.leader_address.as_ref().ok_or_else(|| {
+            KeyzError::InvalidConfig(
+                "replication.leader_address is required for follower role".into(),
+            )
+        })?;
+        addr.to_socket_addrs()
+            .map_err(|_| {
+                KeyzError::InvalidConfig(format!("cannot resolve leader_address: {addr}"))
+            })?
+            .next()
+            .ok_or_else(|| {
+                KeyzError::InvalidConfig("leader_address resolved to no addresses".into())
+            })
+    }
+
+    fn validate(&self) -> Result<()> {
+        match self.role {
+            ReplicationRole::Leader => {
+                self.bind_addr()?;
+            }
+            ReplicationRole::Follower => {
+                let address = self.leader_address.as_deref().ok_or_else(|| {
+                    KeyzError::InvalidConfig(
+                        "replication.leader_address is required for follower role".into(),
+                    )
+                })?;
+                // DNS is resolved asynchronously on each reconnect, not during validation.
+                let valid = if let Ok(address) = address.parse::<SocketAddr>() {
+                    address.port() != 0
+                } else if let Some((host, port)) = address.rsplit_once(':') {
+                    !host.is_empty()
+                        && host.len() <= 253
+                        && host
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b".-_".contains(&b))
+                        && port.parse::<u16>().is_ok_and(|port| port != 0)
+                } else {
+                    false
+                };
+                if !valid {
+                    return Err(KeyzError::InvalidConfig(format!(
+                        "invalid leader_address: {address}"
+                    )));
+                }
+            }
+            ReplicationRole::Disabled => {}
+        }
+        Ok(())
+    }
+}
+
+impl Default for ReplicationConfig {
+    fn default() -> Self {
+        Self {
+            role: ReplicationRole::default(),
+            bind: Self::default_bind(),
+            leader_address: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follower_addresses_support_dns_and_bracketed_ipv6_without_lookup() {
+        for address in ["not-resolved.example:7668", "localhost:7668", "[::1]:7668"] {
+            let input = format!("[replication]\nrole='follower'\nleader_address='{address}'");
+            assert!(Config::from_toml_str(&input).is_ok(), "rejected {address}");
+        }
+        for address in [
+            "localhost",
+            "host:0",
+            "host:99999",
+            "bad host:7668",
+            "::1:7668",
+            "https://host:7668",
+        ] {
+            let input = format!("[replication]\nrole='follower'\nleader_address='{address}'");
+            assert!(Config::from_toml_str(&input).is_err(), "accepted {address}");
+        }
+    }
+
+    #[test]
+    fn leader_frame_limit_reserves_replication_record_metadata() {
+        let maximum = crate::server::replication::MAX_REPLICATION_FRAME
+            - crate::server::replication::REPLICATION_SET_OVERHEAD;
+        let settings =
+            |limit| format!("[replication]\nrole='leader'\n[protocol]\nmax_message_bytes={limit}");
+        assert!(Config::from_toml_str(&settings(maximum)).is_ok());
+        assert!(Config::from_toml_str(&settings(maximum + 1)).is_err());
+    }
+
+    #[test]
+    fn listen_address_accepts_ipv6_host_without_manual_brackets() {
+        let config = ServerConfig {
+            host: "::1".into(),
+            ..Default::default()
+        };
+        assert_eq!(config.socket_addr().unwrap(), "[::1]:7667".parse().unwrap());
+    }
 
     #[test]
     fn defaults_when_input_empty() {
@@ -492,6 +777,39 @@ mod tests {
         assert_eq!(cfg.server.host, "127.0.0.1");
         assert_eq!(cfg.store.compression_threshold, 512);
         assert_eq!(cfg.protocol.max_message_bytes, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rejects_zero_resource_limits_and_partial_tls_identity() {
+        for input in [
+            "[server]\nmax_connections=0",
+            "[server]\nwork_queue_capacity=0",
+            "[server]\nwrite_timeout_secs=0",
+            "[server]\nshutdown_timeout_secs=0",
+            "[security.tls]\nenabled=true\ncert_path='cert.pem'",
+        ] {
+            assert!(Config::from_toml_str(input).is_err(), "accepted {input}");
+        }
+    }
+
+    #[test]
+    fn non_ascii_encryption_key_is_an_error_instead_of_panicking() {
+        let input = format!("a{}b", "é".repeat(31));
+        assert_eq!(input.len(), 64);
+        assert!(parse_hex_key(&input).is_err());
+    }
+
+    #[test]
+    fn authentication_tokens_are_redacted_from_debug_output() {
+        let security = SecurityConfig {
+            auth_token: Some("private-secret".into()),
+            replication_token: Some("replication-secret".into()),
+            ..SecurityConfig::default()
+        };
+        let output = format!("{security:?}");
+        assert!(!output.contains("private-secret"));
+        assert!(!output.contains("replication-secret"));
+        assert!(output.contains("[redacted]"));
     }
 
     #[test]
@@ -601,5 +919,54 @@ mod tests {
         assert_eq!(cfg.store.disk.partition_count, 16);
         assert_eq!(cfg.store.disk.cache_max_entries, 10_000);
         assert_eq!(cfg.store.disk.flush_interval_ms, 5000);
+    }
+
+    #[test]
+    fn defaults_to_disabled_replication() {
+        let cfg = Config::from_toml_str("").expect("config should load");
+        assert_eq!(cfg.replication.role, ReplicationRole::Disabled);
+    }
+
+    #[test]
+    fn parses_leader_replication() {
+        let cfg = Config::from_toml_str(
+            r#"
+            [replication]
+            role = "leader"
+            bind = "0.0.0.0:9000"
+        "#,
+        )
+        .expect("config should parse");
+        assert_eq!(cfg.replication.role, ReplicationRole::Leader);
+        assert_eq!(cfg.replication.bind, "0.0.0.0:9000");
+    }
+
+    #[test]
+    fn parses_follower_replication() {
+        let cfg = Config::from_toml_str(
+            r#"
+            [replication]
+            role = "follower"
+            leader_address = "10.0.0.1:7668"
+        "#,
+        )
+        .expect("config should parse");
+        assert_eq!(cfg.replication.role, ReplicationRole::Follower);
+        assert_eq!(
+            cfg.replication.leader_address,
+            Some("10.0.0.1:7668".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_follower_without_leader_address() {
+        let err = Config::from_toml_str(
+            r#"
+            [replication]
+            role = "follower"
+        "#,
+        )
+        .expect_err("should fail");
+        assert!(matches!(err, KeyzError::InvalidConfig(_)));
     }
 }

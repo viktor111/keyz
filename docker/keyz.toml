@@ -1,0 +1,6 @@
+[server]
+host = "0.0.0.0"
+port = 7667
+
+# The image defaults to memory storage. Mount a configuration and data directory
+# writable by UID 10001 to enable persistence. See docs/operations.md for TLS.

@@ -36,7 +36,6 @@ pub fn decrypt_partition(data: &[u8], key: &[u8; 32]) -> Result<Vec<u8>> {
         .map_err(|e| KeyzError::Encryption(e.to_string()))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,8 +97,8 @@ mod tests {
     fn parse_hex_key_valid() {
         let hex = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
         let key = parse_hex_key(hex).unwrap();
-        for i in 0..32 {
-            assert_eq!(key[i], i as u8);
+        for (i, byte) in key.iter().enumerate() {
+            assert_eq!(*byte, i as u8);
         }
     }
 

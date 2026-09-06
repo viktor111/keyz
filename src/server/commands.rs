@@ -33,12 +33,15 @@ pub fn info(store: &Store, protocol: &ProtocolConfig) -> Result<String> {
     let payload = json!({
         "store": store_stats,
         "protocol": {
+            "versions": ["legacy", "KEYZ/1"],
             "max_message_bytes": protocol.max_message_bytes,
             "idle_timeout_secs": protocol.idle_timeout_secs,
             "close_command": protocol.close_command,
             "timeout_response": protocol.timeout_response,
             "invalid_command_response": protocol.invalid_command_response,
-        }
+        },
+        "replication": store.replication_info(),
+        "health": store.health().snapshot(),
     });
 
     Ok(payload.to_string())

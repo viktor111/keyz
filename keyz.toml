@@ -1,6 +1,11 @@
 [server]
 host = "127.0.0.1"
 port = 7667
+max_connections = 1024
+work_queue_capacity = 1024
+write_timeout_secs = 30
+# Network drain deadline; accepted storage work still drains to completion.
+shutdown_timeout_secs = 30
 
 [protocol]
 max_message_bytes = 4_194_304
@@ -10,6 +15,9 @@ timeout_response = "error:timeout"
 invalid_command_response = "error:invalid command"
 
 [store]
+# Key + stored payload bytes (after compression); 0 means unlimited.
+# Excludes allocator/metadata, queued requests and temporary snapshot copies.
+max_bytes = 0
 # Backend: "memory" (default, data lost on restart) or "disk" (persistent)
 # backend = "memory"
 compression_threshold = 512
@@ -23,7 +31,31 @@ cleanup_interval_ms = 250
 # partition_count = 16
 # encryption_enabled = false
 # encryption_key = "64-hex-char-key-here"  # or set KEYZ_ENCRYPTION_KEY env var
-# cache_max_entries = 10000                 # 0 to disable read-through cache
+# cache_max_entries = 10000                 # accepted for compatibility; no-op
 # flush_interval_ms = 5000
 # aof_enabled = true                        # append-only file for crash recovery
 # aof_fsync = "every_second"                # "every_write" or "every_second"
+
+# Replication: "disabled" (default), "leader", or "follower"
+# [replication]
+# role = "disabled"
+# bind = "0.0.0.0:7668"                     # leader listens for followers here
+# leader_address = "127.0.0.1:7668"         # follower connects to leader here
+
+# Tokens can instead be set via KEYZ_AUTH_TOKEN / KEYZ_REPLICATION_TOKEN.
+# A missing replication token falls back to the client token.
+# [security]
+# auth_token = "replace-with-a-random-secret"
+# replication_token = "replace-with-a-separate-random-secret"
+# Exact IP:port destinations the CLI may probe from leader-advertised followers.
+# Discovery probes are skipped by default. This grants use of client credentials.
+# trusted_cluster_addresses = ["127.0.0.1:7669", "[::1]:7670"]
+
+# TLS covers both client and replication listeners. Servers need a PEM chain
+# and private key; outgoing clients/followers need a PEM CA trust bundle.
+# [security.tls]
+# enabled = true
+# cert_path = "./certs/server.pem"
+# key_path = "./certs/server-key.pem"
+# ca_path = "./certs/ca.pem"
+# server_name = "keyz.example.com"            # peer certificate name
